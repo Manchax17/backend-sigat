@@ -33,7 +33,8 @@ jobs:
           pip freeze --exclude-editable > "$RUNNER_TEMP/congelado.txt"
           pip-audit -r "$RUNNER_TEMP/congelado.txt" --disable-pip --no-deps --strict
       - name: Barrido de secretos
-        run: detect-secrets scan --exclude-files '(contracts/openapi\.json|\.env\.example|README\.md)' | python -c "import json,sys; r=json.load(sys.stdin)['results']; sys.exit(1 if r else 0)"
+        # tests/vectores_huella.json son hashes SHA-256 del contrato de huella, no secretos.
+        run: detect-secrets scan --exclude-files '(contracts/openapi\.json|\.env\.example|README\.md|tests/vectores_huella\.json)' | python -c "import json,sys; r=json.load(sys.stdin)['results']; sys.exit(1 if r else 0)"
 
   cambios-bd:
     # Detiene el PR si una migración o un SQL elimina tablas, columnas, relaciones o datos, hasta que
