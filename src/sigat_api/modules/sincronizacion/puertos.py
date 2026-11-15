@@ -1,5 +1,6 @@
 """Lo que SINCRONIZACIÓN necesita de otros módulos."""
 
+from datetime import date
 from typing import Protocol
 
 from sigat_api.compartido.contratos import OperacionCampo, ResultadoAplicacion
@@ -27,4 +28,10 @@ class PuertoRecalculo(Protocol):
 class PuertoConcepto(Protocol):
     """Implementa: concepto.ServicioConcepto."""
 
-    async def reemitir(self, peri_id: int, indi_id: int, motivo: str) -> None: ...
+    async def reemitir(
+        self,
+        peri_id: int,
+        indi_id: int,
+        motivo: str,
+        fecha_efecto: date | None = None,
+    ) -> None: ...

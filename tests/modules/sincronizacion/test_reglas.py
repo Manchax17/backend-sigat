@@ -79,6 +79,42 @@ class RepoFalso:
             self._siguiente = siguiente
             raise
 
+    async def operacion(self, oper_id: int) -> dict[str, Any] | None:
+        fila = self.ops.get(oper_id)
+        if fila is None:
+            return None
+        return {
+            "oper_id": fila["oper_id"],
+            "disp_id": fila["disp_id"],
+            "oper_cliente_id": fila["cliente_id"],
+            "usua_id": fila["usua_id"],
+            "oper_entidad": str(fila["entidad"]),
+            "oper_accion": str(fila["accion"]),
+            "oper_registro_id": fila["registro_id"],
+            "oper_version": fila["version"],
+            "oper_hash_contenido": fila["hash"],
+            "oper_clasificacion": str(fila["clasificacion"]),
+            "oper_motivo": fila["motivo"],
+            "oper_t_captura": fila["t_captura"],
+            "oper_deriva_reloj_seg": fila["deriva"],
+            "oper_payload": fila["payload"],
+            "oper_resuelve_oper_id": fila.get("resuelve"),
+        }
+
+    async def ya_resuelta(self, oper_id: int) -> bool:
+        return any(fila.get("resuelve") == oper_id for fila in self.ops.values())
+
+    async def fijar_clasificacion(
+        self, oper_id: int, clasificacion: str, motivo: str | None, payload: dict[str, Any] | None
+    ) -> None:
+        self.ops[oper_id].update(
+            {
+                "clasificacion": ClasificacionOperacion(clasificacion),
+                "motivo": motivo,
+                "payload": payload,
+            }
+        )
+
     async def pendientes_de_usuario(self, usua_id: int, clasificaciones: list[str]) -> list[dict[str, Any]]:
         return [
             {
@@ -95,7 +131,9 @@ class RepoFalso:
                 "datos": fila["payload"] or {},
             }
             for fila in self.ops.values()
-            if fila["usua_id"] == usua_id and str(fila["clasificacion"]) in clasificaciones
+            if fila["usua_id"] == usua_id
+            and str(fila["clasificacion"]) in clasificaciones
+            and fila.get("resuelve") is None
         ]
 
 
@@ -287,7 +325,11 @@ async def test_sincronizacion_05() -> None:
     assert respuesta.resultados[0].resultado is ResultadoSync.REVISAR
     assert respuesta.resultados[0].codigo == "DERIVA_RELOJ"
     assert next(iter(repo.ops.values()))["clasificacion"] is ClasificacionOperacion.REVISAR
-    assert next(iter(repo.ops.values()))["payload"] == op.datos
+    guardado = next(iter(repo.ops.values()))["payload"]
+    # operacion_sync no tiene columnas para el instante ni el linaje: viajan en el payload
+    # con prefijo reservado ``_`` para que «resolver(confirmar)» pueda reaplicarlos.
+    assert {k: v for k, v in guardado.items() if not k.startswith("_")} == op.datos
+    assert guardado["_t_observacion"] == op.t_observacion.isoformat()
     assert len(registro.llamadas) == 1
     assert confirmada.resultados[0].resultado is ResultadoSync.ALTA_NUEVA
 
@@ -442,3 +484,123 @@ async def test_pendientes_devuelve_datos_guardados() -> None:
     assert len(pendientes) == 1
     assert pendientes[0].motivo == "solapamiento"
     assert pendientes[0].datos == {"lect_leida": True, "lect_especimenes": 3}
+
+
+@pytest.mark.regla
+async def test_cambios_usa_cursor_compuesto_y_marca_hay_mas() -> None:
+    """La bajada de cambios pagina con ``<iso>|<id>`` y no repite la última fila."""
+    capturado: dict[str, Any] = {}
+
+    class RepoCambios(RepoFalso):
+        async def cambios_desde(self, usua_id: int, desde: Any, limite: int) -> list[dict[str, Any]]:
+            capturado["usua"] = usua_id
+            capturado["desde"] = desde
+            capturado["limite"] = limite
+            return [
+                {"tipo": "lectura", "id": "abc", "accion": "creado", "t": AHORA},
+                {"tipo": "revision", "id": "def", "accion": "actualizado", "t": AHORA},
+            ]
+
+    servicio, _, _, _ = _servicio(repo=RepoCambios())
+
+    primera = await servicio.cambios(_actor(), None, limite=2)
+    segunda = await servicio.cambios(_actor(), primera.cursor, limite=2)
+
+    assert capturado["desde"] == (AHORA, "def")  # el cursor viaja como (t, id)
+    assert primera.cursor == f"{AHORA.isoformat()}|def"
+    assert primera.hay_mas is True
+    assert [c.tipo for c in primera.cambios] == ["lectura", "revision"]
+    assert segunda.servidor_utc == AHORA
+
+
+@pytest.mark.regla
+async def test_resolver_confirmar_aplica_el_payload_guardado() -> None:
+    """Confirmar una operación en «revisar» la aplica como alta, sin pedirle nada más al móvil."""
+    repo = RepoFalso()
+    registro = RegistroFalso()
+    registro.resultados = [ResultadoAplicacion(ClasificacionOperacion.ALTA_NUEVA)]
+    svc, _, _, _ = _servicio(repo=repo, registro=registro)
+    original = _op(datos={"pred_id": 1, "lote_ids": [42]})
+    guardada = await repo.insertar_operacion(
+        {
+            "disp_id": DISP,
+            "cliente_id": original.cliente_id,
+            "usua_id": USUA,
+            "entidad": EntidadSync.VISITA,
+            "accion": AccionSync.CREAR,
+            "registro_id": original.registro_id,
+            "version": 1,
+            "hash": original.hash_contenido,
+            "clasificacion": ClasificacionOperacion.REVISAR,
+            "motivo": "solapamiento",
+            "t_captura": AHORA,
+            "deriva": 0,
+            "payload": {
+                **original.datos,
+                "_t_observacion": original.t_observacion.isoformat(),
+                "_linaje": None,
+            },
+        }
+    )
+
+    resultado = await svc.resolver(
+        _actor(),
+        guardada,
+        e.ResolucionOperacion(decision="confirmar", motivo="Se verificó en campo"),
+    )
+
+    assert resultado.resultado is ResultadoSync.ALTA_NUEVA
+    assert repo.ops[resultado.oper_id]["resuelve"] == guardada
+    # El payload reaplicado lleva el instante original, no la hora del servidor.
+    aplicada = registro.llamadas[-1]
+    assert aplicada.t_observacion == original.t_observacion
+    assert aplicada.datos == original.datos
+
+
+@pytest.mark.regla
+async def test_resolver_descartar_no_toca_el_historico_de_dominio() -> None:
+    repo = RepoFalso()
+    registro = RegistroFalso()
+    svc, _, _, _ = _servicio(repo=repo, registro=registro)
+    original = _op()
+    guardada = await repo.insertar_operacion(
+        {
+            "disp_id": DISP,
+            "cliente_id": original.cliente_id,
+            "usua_id": USUA,
+            "entidad": EntidadSync.VISITA,
+            "accion": AccionSync.CREAR,
+            "registro_id": original.registro_id,
+            "version": 1,
+            "hash": original.hash_contenido,
+            "clasificacion": ClasificacionOperacion.RECHAZADA,
+            "motivo": "fuera de periodo",
+            "t_captura": AHORA,
+            "deriva": 0,
+            "payload": {**original.datos, "_t_observacion": original.t_observacion.isoformat()},
+        }
+    )
+
+    resultado = await svc.resolver(
+        _actor(),
+        guardada,
+        e.ResolucionOperacion(decision="descartar", motivo="Dato inválido en campo"),
+    )
+
+    assert resultado.resultado is ResultadoSync.RECHAZADA
+    assert registro.llamadas == []
+    # Al descartar no hace falta reaplicar: se guarda el payload sin las claves reservadas.
+    assert repo.ops[resultado.oper_id]["payload"] == original.datos
+
+
+async def test_claves_del_servidor_en_los_datos_se_rechazan() -> None:
+    """El cliente no puede enviar ``usua_id``/``disp_id``/``oper_id`` ni ``*_t_sincronizacion``."""
+    svc, repo, registro, _ = _servicio()
+    op = _op(datos={"pred_id": 1, "usua_id": 99, "visi_t_sincronizacion": AHORA.isoformat()})
+
+    respuesta = await svc.recibir(_actor(), _lote(op))
+
+    assert respuesta.resultados[0].resultado is ResultadoSync.RECHAZADA
+    assert respuesta.resultados[0].codigo == "CAMPO_PROHIBIDO"
+    assert registro.llamadas == []
+    assert next(iter(repo.ops.values()))["payload"] is not None

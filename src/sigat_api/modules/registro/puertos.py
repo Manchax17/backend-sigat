@@ -16,6 +16,10 @@ class PuertoConfiguracion(Protocol):
 
     async def lote_activo_en(self, lote_id: int, instante: datetime) -> bool: ...
 
+    async def lote_visible(self, usua_id: int, lote_id: int) -> bool: ...
+
+    async def lote_predio(self, lote_id: int) -> int | None: ...
+
 
 class PuertoOperaciones(Protocol):
     """Implementa: sincronización. Para escrituras EN LÍNEA de la web, que también necesitan

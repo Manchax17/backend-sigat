@@ -2,16 +2,18 @@
 
 from datetime import UTC, datetime
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sigat_api.compartido.contratos import OperacionCampo, ResultadoAplicacion
-from sigat_api.compartido.errores import NoImplementado, Prohibido
+from sigat_api.compartido.errores import Conflicto, NoEncontrado, NoImplementado, Prohibido
 from sigat_api.compartido.tipos import (
     AccionSync,
     Actor,
     ClasificacionOperacion,
     EntidadSync,
+    Linaje,
     ResultadoSync,
+    RolCodigo,
 )
 from sigat_api.config import Configuracion
 from sigat_api.infra.cola.cola import TAREA_REPROCESAR_PERIODO, Cola
@@ -109,10 +111,125 @@ class ServicioSincronizacion:
     async def resolver(self, actor: Actor, oper_id: int, s: e.ResolucionOperacion) -> e.ResultadoOperacion:
         """Solo el autor de la operación o un agrónomo del predio. 'confirmar' aplica el payload
         guardado como alta; 'descartar' deja constancia. Ambas crean operación con oper_resuelve_oper_id."""
-        raise NoImplementado("Resolución de operación")
+        original = await self._repo.operacion(oper_id)
+        if original is None:
+            raise NoEncontrado("La operación no existe.", codigo="OPERACION_INEXISTENTE")
+        if str(original["oper_clasificacion"]) not in (
+            ClasificacionOperacion.REVISAR.value,
+            ClasificacionOperacion.RECHAZADA.value,
+        ):
+            raise Conflicto(
+                "Solo se resuelven operaciones en «revisar» o «rechazada».",
+                codigo="OPERACION_NO_RESOLUBLE",
+            )
+        if await self._repo.ya_resuelta(oper_id):
+            raise Conflicto("La operación ya fue resuelta.", codigo="REVISION_YA_RESUELTA")
+        if actor.usua_id != int(original["usua_id"]) and actor.rol not in (
+            RolCodigo.AGRONOMO_SUPERVISOR,
+            RolCodigo.ADMINISTRADOR,
+        ):
+            raise Prohibido(
+                "Solo el autor o un agrónomo del predio pueden resolverla.",
+                codigo="SIN_PERMISO_RESOLUCION",
+            )
+
+        confirmar = s.decision == "confirmar"
+        clasificacion = ClasificacionOperacion.ALTA_NUEVA if confirmar else ClasificacionOperacion.RECHAZADA
+        datos = dict(original.get("oper_payload") or {})
+        t_observacion = _fecha_payload(datos.pop("_t_observacion", None)) or original["oper_t_captura"]
+        linaje = datos.pop("_linaje", None)
+        async with self._repo.punto_de_guarda():
+            nuevo_oper_id = await self._repo.insertar_operacion(
+                {
+                    "disp_id": original["disp_id"],
+                    "cliente_id": uuid4(),
+                    "usua_id": int(original["usua_id"]),
+                    "entidad": original["oper_entidad"],
+                    "accion": original["oper_accion"],
+                    "registro_id": original["oper_registro_id"],
+                    "version": int(original["oper_version"]),
+                    "hash": str(original["oper_hash_contenido"]).strip(),
+                    "clasificacion": clasificacion,
+                    "motivo": s.motivo,
+                    "t_captura": original["oper_t_captura"],
+                    "deriva": original.get("oper_deriva_reloj_seg"),
+                    "payload": None if confirmar else datos,
+                    "resuelve": oper_id,
+                }
+            )
+            if confirmar:
+                campo = OperacionCampo(
+                    oper_id=nuevo_oper_id,
+                    cliente_id=uuid4(),
+                    disp_id=original["disp_id"],
+                    entidad=EntidadSync(str(original["oper_entidad"])),
+                    accion=AccionSync(str(original["oper_accion"])),
+                    registro_id=original["oper_registro_id"],
+                    version=int(original["oper_version"]),
+                    linaje=Linaje(str(linaje)) if linaje else None,
+                    t_observacion=t_observacion,
+                    t_captura=original["oper_t_captura"],
+                    deriva_reloj_seg=original.get("oper_deriva_reloj_seg"),
+                    datos=datos,
+                )
+                resultado = await self._registro.aplicar(actor, campo)
+                if resultado.clasificacion != clasificacion:
+                    await self._repo.fijar_clasificacion(
+                        nuevo_oper_id,
+                        resultado.clasificacion.value,
+                        resultado.motivo,
+                        datos
+                        if resultado.clasificacion
+                        in (
+                            ClasificacionOperacion.REVISAR,
+                            ClasificacionOperacion.RECHAZADA,
+                        )
+                        else None,
+                    )
+                clasificacion = resultado.clasificacion
+                motivo = resultado.motivo
+            else:
+                motivo = s.motivo
+
+        return e.ResultadoOperacion(
+            cliente_id=original["oper_cliente_id"],
+            oper_id=nuevo_oper_id,
+            resultado=ResultadoSync(clasificacion.value),
+            motivo=motivo,
+            codigo=None,
+            registro_id=original["oper_registro_id"],
+            version=int(original["oper_version"]),
+            reproceso="no_aplica",
+            fecha_efecto=None,
+            reintentable=False,
+        )
 
     async def cambios(self, actor: Actor, desde: str | None, limite: int) -> e.Cambios:
-        raise NoImplementado("Cambios del servidor")
+        ahora = self._reloj.ahora()
+        cursor_t, cursor_id = _leer_cursor(desde)
+        filas = await self._repo.cambios_desde(
+            actor.usua_id, (cursor_t, cursor_id) if cursor_t else None, limite
+        )
+        cambios = [
+            e.CambioServidor(
+                tipo=fila["tipo"],
+                id=str(fila["id"]),
+                accion=fila["accion"],
+                t=fila["t"],
+            )
+            for fila in filas
+        ]
+        if filas:
+            ultimo = filas[-1]
+            cursor = f"{ultimo['t'].isoformat()}|{ultimo['id']}"
+        else:
+            cursor = desde or f"{ahora.isoformat()}|"
+        return e.Cambios(
+            cursor=cursor,
+            servidor_utc=ahora,
+            cambios=cambios,
+            hay_mas=len(filas) >= limite,
+        )
 
     # ---------------------------------------------------------------- operación
     async def _verificar_dispositivo(self, actor: Actor, lote: e.LoteSincronizacion) -> None:
@@ -226,7 +343,9 @@ class ServicioSincronizacion:
     ) -> e.ResultadoOperacion:
         """Guarda una operación que no se aplica (revisar/rechazada), con su payload."""
         async with self._repo.punto_de_guarda():
-            oper_id = await self._insertar(actor, disp_id, op, clasificacion, motivo, deriva, op.datos)
+            oper_id = await self._insertar(
+                actor, disp_id, op, clasificacion, motivo, deriva, _payload_persistido(op)
+            )
         return self._resultado(
             op,
             oper_id=oper_id,
@@ -271,7 +390,7 @@ class ServicioSincronizacion:
                     resultado.clasificacion,
                     resultado.motivo,
                     deriva,
-                    op.datos if guarda_payload else None,
+                    _payload_persistido(op) if guarda_payload else None,
                 )
                 if not guarda_payload:
                     confirmado = await self._delegar(actor, disp_id, op, oper_id)
@@ -352,7 +471,12 @@ class ServicioSincronizacion:
         for peri_id in periodos:
             await self._cola.encolar(
                 TAREA_REPROCESAR_PERIODO,
-                {"peri_id": peri_id, "motivo": "sincronizacion", "oper_id": oper_id},
+                {
+                    "peri_id": peri_id,
+                    "motivo": "sincronizacion",
+                    "oper_id": oper_id,
+                    "fecha_efecto": resultado.fecha_efecto.isoformat() if resultado.fecha_efecto else None,
+                },
                 clave_unica=f"reprocesar_periodo:{peri_id}",
             )
         return "encolado", resultado.fecha_efecto
@@ -383,6 +507,34 @@ class ServicioSincronizacion:
             fecha_efecto=fecha_efecto,
             reintentable=reintentable,
         )
+
+
+def _payload_persistido(op: e.OperacionSync) -> dict[str, Any]:
+    """``oper_payload`` de una operación que no se aplica.
+
+    ``operacion_sync`` no tiene columna para ``t_observacion`` ni ``linaje``; ambos hacen falta
+    para que ``resolver(confirmar)`` pueda aplicar el payload después. Se guardan con prefijo
+    ``_`` (reservado) dentro del JSON y se ocultan en la bandeja del móvil.
+    """
+    return {
+        **op.datos,
+        "_t_observacion": op.t_observacion.isoformat(),
+        "_linaje": str(op.linaje) if op.linaje else None,
+    }
+
+
+def _fecha_payload(valor: object) -> datetime | None:
+    if not valor:
+        return None
+    return datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+
+
+def _leer_cursor(desde: str | None) -> tuple[datetime | None, str]:
+    """Cursor ``<iso>|<id>``: el id desempata las filas con el mismo ``t`` (``now()`` de la tx)."""
+    if not desde:
+        return None, ""
+    instante, _, ident = desde.partition("|")
+    return datetime.fromisoformat(instante.replace("Z", "+00:00")), ident
 
 
 def _validar_datos(op: e.OperacionSync) -> tuple[str, str] | None:

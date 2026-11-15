@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from sigat_api.compartido.errores import NoImplementado
 from sigat_api.compartido.tipos import AccionSync, ClasificacionOperacion
 
 
@@ -58,12 +57,46 @@ class EstadoPrevio:
     hay_solapamiento: bool  # R-T5: otra medición del mismo tipo cubre esa ventana (lote+trampa)
 
 
+def decidir(
+    accion: AccionSync, version: int, t_observacion: datetime, previo: EstadoPrevio
+) -> tuple[ClasificacionOperacion, MotivoRechazo | None]:
+    """Como :func:`clasificar`, pero devuelve también el motivo del rechazo.
+
+    Así ``ServicioRegistro`` responde al móvil con el texto y el código sin
+    volver a interpretar la clasificación.
+    """
+    if accion == AccionSync.CREAR:
+        # Un alta sobre un id que ya existe no es idempotencia: hay que reenviarla
+        # como ``corregir`` con la versión siguiente (R-T3).
+        if previo.version_vigente is not None:
+            return ClasificacionOperacion.RECHAZADA, MotivoRechazo.VERSION_INVALIDA
+        if previo.hay_solapamiento:
+            return ClasificacionOperacion.REVISAR, None
+        if (
+            previo.ultima_t_observacion_serie is not None
+            and t_observacion < previo.ultima_t_observacion_serie
+        ):
+            return ClasificacionOperacion.ALTA_RETROACTIVA, None
+        return ClasificacionOperacion.ALTA_NUEVA, None
+
+    # corregir / anular: solo sobre un registro existente y con la versión inmediatamente siguiente.
+    if previo.version_vigente is None:
+        return ClasificacionOperacion.RECHAZADA, MotivoRechazo.REGISTRO_INEXISTENTE
+    if version != previo.version_vigente + 1:
+        return ClasificacionOperacion.RECHAZADA, MotivoRechazo.VERSION_INVALIDA
+    if previo.t_observacion_original is not None and t_observacion != previo.t_observacion_original:
+        return ClasificacionOperacion.RECHAZADA, MotivoRechazo.T_OBSERVACION_CAMBIADA
+    if previo.hay_solapamiento:
+        return ClasificacionOperacion.REVISAR, None
+    return ClasificacionOperacion.CORRECCION, None
+
+
 def clasificar(
     accion: AccionSync, version: int, t_observacion: datetime, previo: EstadoPrevio
 ) -> ClasificacionOperacion:
     """Decide la clasificación de ADR-04 para una operación YA validada en forma y dominio.
 
-    Reglas que debe implementar (y probar en tests/modules/registro):
+    Reglas (probadas en tests/modules/registro):
     * R-T3: accion=corregir|anular y existe -> ``correccion`` si version == vigente + 1;
       si no existe -> ``rechazada`` (REGISTRO_INEXISTENTE); si salta versiones -> ``rechazada``.
     * ADR-02: en corrección, t_observacion != original -> ``rechazada`` (T_OBSERVACION_CAMBIADA).
@@ -72,7 +105,7 @@ def clasificar(
     * accion=crear en otro caso -> ``alta_nueva``.
     La idempotencia (R-T4) y el conflicto de contenido se resuelven ANTES, en sincronización.
     """
-    raise NoImplementado("Clasificación de la operación (motor temporal)")
+    return decidir(accion, version, t_observacion, previo)[0]
 
 
 def orden_canonico(

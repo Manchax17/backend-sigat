@@ -3,6 +3,7 @@
 from datetime import date
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from sigat_api.compartido.errores import NoImplementado
@@ -35,7 +36,65 @@ class RepositorioConcepto:
 
     async def insertar_concepto(self, fila: dict[str, Any]) -> int:
         """INSERT concepto_aptitud versión n+1 (fn_concepto_valida)."""
-        raise NoImplementado("Insertar concepto")
+        conc_id = await self._con.scalar(
+            text(
+                """
+INSERT INTO sigat.concepto_aptitud (
+    lote_id, peri_id, indi_id, conc_version, conc_resultado,
+    conc_fecha_efecto, norm_id, conc_motivo
+) VALUES (
+    :lote_id, :peri_id, :indi_id, :version, :resultado,
+    :fecha_efecto, :norm_id, :motivo
+)
+RETURNING conc_id
+"""
+            ),
+            fila,
+        )
+        return int(conc_id)
+
+    async def indice(self, indi_id: int) -> dict[str, Any] | None:
+        """Datos del MTD que el concepto necesita (contraste, norma y lote del periodo)."""
+        fila = (
+            (
+                await self._con.execute(
+                    text(
+                        """
+SELECT m.indi_id, m.peri_id, m.indi_resultado_contraste, m.norm_id, m.indi_valor,
+       p.lote_id, p.peri_fin
+  FROM sigat.indice_mtd m
+  JOIN sigat.periodo_trampeo p ON p.peri_id = m.peri_id
+ WHERE m.indi_id = :indi
+"""
+                    ),
+                    {"indi": indi_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return dict(fila) if fila else None
+
+    async def ultimo_concepto(self, lote_id: int, peri_id: int) -> dict[str, Any] | None:
+        fila = (
+            (
+                await self._con.execute(
+                    text(
+                        """
+SELECT conc_id, conc_version, conc_resultado, indi_id, norm_id, conc_fecha_efecto
+  FROM sigat.concepto_aptitud
+ WHERE lote_id = :lote AND peri_id = :peri
+ ORDER BY conc_version DESC
+ LIMIT 1
+"""
+                    ),
+                    {"lote": lote_id, "peri": peri_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return dict(fila) if fila else None
 
     async def cultivo_productor(self, usua_id: int) -> dict[str, Any]:
         raise NoImplementado("Cultivo del productor")

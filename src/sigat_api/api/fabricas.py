@@ -8,15 +8,16 @@ importan entre ellos (import-linter lo verifica).
 
 from datetime import datetime
 from functools import lru_cache
+from typing import Any
 
+import structlog
 from fastapi import Depends
 
 from sigat_api.api.dependencias import ConexionDep, ConexionPublicaDep, configuracion
 from sigat_api.compartido.contratos import PertenenciaTrampa
-from sigat_api.compartido.errores import NoImplementado
 from sigat_api.config import Configuracion
 from sigat_api.infra.almacenamiento.objetos import AlmacenS3
-from sigat_api.infra.cola.cola import ColaProcrastinate
+from sigat_api.infra.cola.cola import TAREA_REPROCESAR_PERIODO, ColaProcrastinate
 from sigat_api.infra.reloj import RelojSistema
 from sigat_api.infra.seguridad.tokens import ServicioTokens
 from sigat_api.modules.auditoria.repositorio import RepositorioAuditoria
@@ -47,15 +48,19 @@ from sigat_api.modules.notificaciones.repositorio import RepositorioNotificacion
 from sigat_api.modules.notificaciones.servicio import ServicioNotificaciones
 from sigat_api.modules.planificacion.repositorio import RepositorioPlanificacion
 from sigat_api.modules.planificacion.servicio import ServicioPlanificacion
+from sigat_api.modules.registro.mtd import MotorMtd
 from sigat_api.modules.registro.repositorio import RepositorioRegistro
 from sigat_api.modules.registro.servicio import ServicioConsultaRegistro, ServicioRegistro, ServicioRevision
 from sigat_api.modules.registro.validador import ValidadorInvariantes
+from sigat_api.modules.sincronizacion.procesador import ProcesadorReproceso
 from sigat_api.modules.sincronizacion.repositorio import RepositorioSincronizacion
 from sigat_api.modules.sincronizacion.servicio import (
     RegistradorOperacionesEnLinea,
     ServicioDispositivos,
     ServicioSincronizacion,
 )
+
+log = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------- recursos de proceso (singleton)
@@ -153,11 +158,65 @@ class _AdaptadorConfiguracionParaRegistro:
 
     async def pertenencia_trampa(self, tram_id: int, instante: datetime) -> PertenenciaTrampa | None:
         """Ubicación de la trampa vigente en ``instante`` (ubicacion_trampa [ubic_fecha, ubic_fecha_fin))."""
-        raise NoImplementado("Pertenencia trampa–lote a una fecha")
+        fila = await self._repo.pertenencia_trampa(tram_id, instante)
+        if fila is None:
+            return None
+        return PertenenciaTrampa(
+            tram_id=tram_id,
+            ubic_id=int(fila["ubic_id"]),
+            lote_id=int(fila["lote_id"]) if fila.get("lote_id") is not None else None,
+            pred_id=int(fila["pred_id"]),
+            lote_activo=await self._repo.lote_activo_en(int(fila["lote_id"]), instante)
+            if fila.get("lote_id") is not None
+            else False,
+        )
 
     async def lote_activo_en(self, lote_id: int, instante: datetime) -> bool:
         """lote_fecha_registro <= fecha < lote_fecha_baja (o sin baja)."""
-        raise NoImplementado("Lote activo a una fecha")
+        return await self._repo.lote_activo_en(lote_id, instante)
+
+    async def lote_visible(self, usua_id: int, lote_id: int) -> bool:
+        return await self._repo.lote_visible(usua_id, lote_id)
+
+    async def lote_predio(self, lote_id: int) -> int | None:
+        return await self._repo.lote_predio(lote_id)
+
+
+class _ColaEnProceso:
+    """Sustituto temporal de ``procrastinate`` mientras no se autorice el esquema ``cola``.
+
+    Ejecuta el reproceso en la misma transacción, en un SAVEPOINT: si el recálculo
+    falla, el dato de campo ya aplicado se conserva (ADR-12) y el periodo se
+    recalcula en la siguiente lectura. Cuando exista la cola real, se cambia esta
+    clase sin tocar ``ServicioSincronizacion``.
+    """
+
+    def __init__(self, con: Any) -> None:
+        self._con = con
+        self._hechas: set[str] = set()
+
+    async def encolar(self, tarea: str, datos: dict[str, Any], *, clave_unica: str | None = None) -> None:
+        if tarea != TAREA_REPROCESAR_PERIODO:
+            log.warning("cola_en_proceso.tarea_no_soportada", tarea=tarea)
+            return
+        if clave_unica is not None:
+            if clave_unica in self._hechas:
+                return
+            self._hechas.add(clave_unica)
+        procesador = ProcesadorReproceso(
+            MotorMtd(RepositorioRegistro(self._con)),
+            ServicioConcepto(RepositorioConcepto(self._con)),
+        )
+        try:
+            async with self._con.begin_nested():
+                await procesador.ejecutar(
+                    peri_id=int(datos["peri_id"]),
+                    motivo=str(datos.get("motivo", "sincronizacion")),
+                    oper_id=int(datos["oper_id"]) if datos.get("oper_id") is not None else None,
+                    fecha_efecto=datos.get("fecha_efecto"),
+                )
+        except Exception:  # pragma: no cover - se observa en los logs, no tumba el sync
+            log.exception("cola_en_proceso.reproceso_fallido", tarea=tarea, datos=datos)
 
 
 def servicio_planificacion(con: ConexionDep) -> ServicioPlanificacion:
@@ -169,7 +228,13 @@ def servicio_registro(con: ConexionDep) -> ServicioRegistro:
     configuracion_registro = _AdaptadorConfiguracionParaRegistro(RepositorioConfiguracion(con))
     validador = ValidadorInvariantes(configuracion_registro, repo)
     operaciones = RegistradorOperacionesEnLinea(RepositorioSincronizacion(con))
-    return ServicioRegistro(repo, validador, operaciones=operaciones, reloj=_reloj())
+    return ServicioRegistro(
+        repo,
+        validador,
+        operaciones=operaciones,
+        configuracion=configuracion_registro,
+        reloj=_reloj(),
+    )
 
 
 def servicio_sincronizacion(
@@ -182,7 +247,7 @@ def servicio_sincronizacion(
         RepositorioSincronizacion(con),
         registro=registro,
         planificacion=planificacion,
-        cola=_cola(),
+        cola=_ColaEnProceso(con),
         reloj=_reloj(),
         cfg=cfg,
     )

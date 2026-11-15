@@ -125,6 +125,65 @@ SELECT v.*,
             )
         )
 
+    async def lote_predio(self, lote_id: int) -> int | None:
+        valor = await self._con.scalar(
+            text("SELECT pred_id FROM sigat.lote WHERE lote_id = :lote"), {"lote": lote_id}
+        )
+        return int(valor) if valor is not None else None
+
+    async def pertenencia_trampa(self, tram_id: int, instante: datetime) -> dict[str, Any] | None:
+        """Ubicación de la trampa en la fecha local del predio, no la de hoy."""
+        fila = (
+            (
+                await self._con.execute(
+                    text(
+                        """
+SELECT u.ubic_id,
+       u.lote_id,
+       u.pred_id,
+       t.tram_codigo,
+       l.lote_fecha_registro,
+       l.lote_fecha_baja
+  FROM sigat.ubicacion_trampa u
+  JOIN sigat.trampa t ON t.tram_id = u.tram_id
+  JOIN sigat.lote l ON l.lote_id = u.lote_id
+  JOIN sigat.predio p ON p.pred_id = u.pred_id
+ WHERE u.tram_id = :tram
+   AND u.ubic_fecha <= (CAST(:instante AS timestamptz) AT TIME ZONE p.pred_zona_horaria)::date
+   AND (u.ubic_fecha_fin IS NULL
+        OR u.ubic_fecha_fin > (CAST(:instante AS timestamptz) AT TIME ZONE p.pred_zona_horaria)::date)
+ ORDER BY u.ubic_fecha DESC, u.ubic_id DESC
+ LIMIT 1
+"""
+                    ),
+                    {"tram": tram_id, "instante": instante},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return dict(fila) if fila else None
+
+    async def lote_activo_en(self, lote_id: int, instante: datetime) -> bool:
+        """``lote_fecha_registro <= fecha < lote_fecha_baja`` (o sin baja), en la fecha local."""
+        return bool(
+            await self._con.scalar(
+                text(
+                    """
+SELECT coalesce(
+         l.lote_fecha_registro <= (CAST(:instante AS timestamptz) AT TIME ZONE p.pred_zona_horaria)::date
+         AND (l.lote_fecha_baja IS NULL
+              OR l.lote_fecha_baja > (CAST(:instante AS timestamptz) AT TIME ZONE p.pred_zona_horaria)::date),
+         false)
+  FROM sigat.lote l
+  JOIN sigat.predio p ON p.pred_id = l.pred_id
+ WHERE l.lote_id = :lote
+"""
+                ),
+                {"lote": lote_id, "instante": instante},
+            )
+        )
+
     async def insertar_lote(self, pred_id: int, datos: dict[str, Any]) -> int:
         raise NoImplementado("Alta de lote")
 

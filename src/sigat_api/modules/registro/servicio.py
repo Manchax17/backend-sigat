@@ -6,10 +6,19 @@ from uuid import UUID
 from sigat_api.compartido.contratos import OperacionCampo, ResultadoAplicacion
 from sigat_api.compartido.errores import NoImplementado
 from sigat_api.compartido.esquemas import Pagina
-from sigat_api.compartido.tipos import Actor, EstadoRevision
+from sigat_api.compartido.tipos import (
+    AccionSync,
+    Actor,
+    ClasificacionOperacion,
+    EntidadSync,
+    EstadoRevision,
+    Linaje,
+)
 from sigat_api.infra.reloj import Reloj
+from sigat_api.modules.registro import dominio
 from sigat_api.modules.registro import esquemas as e
-from sigat_api.modules.registro.puertos import PuertoOperaciones
+from sigat_api.modules.registro.dominio import MENSAJES, MotivoRechazo
+from sigat_api.modules.registro.puertos import PuertoConfiguracion, PuertoOperaciones
 from sigat_api.modules.registro.repositorio import RepositorioRegistro
 from sigat_api.modules.registro.validador import ValidadorInvariantes
 
@@ -22,11 +31,13 @@ class ServicioRegistro:
         repo: RepositorioRegistro,
         validador: ValidadorInvariantes,
         operaciones: PuertoOperaciones,
+        configuracion: PuertoConfiguracion,
         reloj: Reloj,
     ) -> None:
         self._repo = repo
         self._validador = validador
         self._operaciones = operaciones
+        self._configuracion = configuracion
         self._reloj = reloj
 
     async def aplicar(self, actor: Actor, op: OperacionCampo) -> ResultadoAplicacion:
@@ -39,7 +50,118 @@ class ServicioRegistro:
         5. Si es lectura oficial (o su corrección/anulación): devolver ``periodos_afectados`` para
            que Sincronización encole el reproceso de MTD y concepto (RF-054, ADR-13).
         """
-        raise NoImplementado("Aplicar operación de campo")
+        ahora = self._reloj.ahora()
+        motivo = await self._validador.validar(op, ahora, actor)
+        if motivo is not None:
+            return self._rechazo(motivo)
+
+        if op.entidad == EntidadSync.VISITA:
+            return await self._aplicar_visita(actor, op)
+        if op.entidad == EntidadSync.LECTURA_TRAMPA:
+            return await self._aplicar_lectura(actor, op)
+
+        return ResultadoAplicacion(
+            ClasificacionOperacion.RECHAZADA,
+            motivo="Esta entidad todavía no se sincroniza desde el móvil.",
+            codigo="ENTIDAD_NO_SOPORTADA",
+        )
+
+    async def _aplicar_visita(self, actor: Actor, op: OperacionCampo) -> ResultadoAplicacion:
+        previo = await self._repo.estado_previo("visita", op.registro_id, None, None, op.t_observacion)
+        clasificacion, motivo = dominio.decidir(op.accion, op.version, op.t_observacion, previo)
+        if motivo is not None:
+            return self._rechazo(motivo)
+        if clasificacion not in (
+            ClasificacionOperacion.ALTA_NUEVA,
+            ClasificacionOperacion.ALTA_RETROACTIVA,
+        ):
+            return ResultadoAplicacion(clasificacion)
+
+        lote_ids = [int(x) for x in op.datos["lote_ids"]]
+        fila = {
+            "visi_id": op.registro_id,
+            "disp_id": op.disp_id,
+            "oper_id": op.oper_id,
+            "usua_id": actor.usua_id,
+            "pred_id": int(op.datos["pred_id"]),
+            "ruta_id": op.datos.get("ruta_id"),
+            "visi_t_inicio_obs": _instante(op.datos["visi_t_inicio_obs"]),
+            "visi_t_fin_obs": _instante(op.datos["visi_t_fin_obs"]),
+            "visi_t_captura": op.t_captura,
+            "visi_deriva_reloj_seg": op.deriva_reloj_seg,
+        }
+        await self._repo.insertar_visita(fila, lote_ids)
+        return ResultadoAplicacion(clasificacion)
+
+    async def _aplicar_lectura(self, actor: Actor, op: OperacionCampo) -> ResultadoAplicacion:
+        tram_id = int(op.datos["tram_id"])
+        pertenencia = await self._configuracion.pertenencia_trampa(tram_id, op.t_observacion)
+        if pertenencia is None or pertenencia.lote_id is None:
+            return self._rechazo(MotivoRechazo.TRAMPA_NO_PERTENECE_AL_LOTE)
+
+        previo = await self._repo.estado_previo(
+            "lectura_trampa", op.registro_id, pertenencia.lote_id, tram_id, op.t_observacion
+        )
+        clasificacion, motivo = dominio.decidir(op.accion, op.version, op.t_observacion, previo)
+        if motivo is not None:
+            return self._rechazo(motivo)
+        if clasificacion == ClasificacionOperacion.REVISAR:
+            return ResultadoAplicacion(
+                clasificacion,
+                motivo="Ya existe otra lectura de esta trampa el mismo día; la decidirá el agrónomo.",
+                codigo="SOLAPAMIENTO",
+            )
+
+        anterior: dict[str, object] = {}
+        if op.version > 1:
+            anterior = await self._repo.lectura_vigente(op.registro_id) or {}
+        datos = dict(anterior)
+        datos.update({k: v for k, v in op.datos.items() if k in anterior or k in _DATOS_LECTURA})
+
+        fila: dict[str, object] = {
+            **datos,
+            "lect_registro_id": op.registro_id,
+            "lect_version": op.version,
+            "usua_id": actor.usua_id,
+            "disp_id": op.disp_id,
+            "oper_id": op.oper_id,
+            "lect_t_observacion": op.t_observacion,
+            "lect_t_captura": op.t_captura,
+            "lect_deriva_reloj_seg": op.deriva_reloj_seg,
+            "lect_linaje": op.linaje or _linaje_de(actor),
+        }
+        if fila.get("ubic_id") is None:
+            fila["ubic_id"] = pertenencia.ubic_id
+        fila["lect_anulada"] = op.accion == AccionSync.ANULAR
+        if op.accion == AccionSync.ANULAR:
+            fila["lect_motivo_anulacion"] = op.datos.get("lect_motivo_anulacion")
+        else:
+            fila.pop("lect_motivo_anulacion", None)
+
+        await self._repo.insertar_version("lectura_trampa", fila)
+
+        periodos: list[int] = []
+        if op.linaje in (None, Linaje.INSPECCION_OFICIAL) and actor.rol.value in (
+            "TECNICO",
+            "AGRONOMO_SUPERVISOR",
+            "ADMINISTRADOR",
+        ):
+            periodo = await self._repo.periodo_de(pertenencia.lote_id, op.t_observacion.date())
+            if periodo is not None:
+                periodos.append(int(periodo["peri_id"]))
+        return ResultadoAplicacion(
+            clasificacion,
+            periodos_afectados=periodos,
+            fecha_efecto=op.t_observacion if periodos else None,
+        )
+
+    @staticmethod
+    def _rechazo(motivo: MotivoRechazo) -> ResultadoAplicacion:
+        return ResultadoAplicacion(
+            ClasificacionOperacion.RECHAZADA,
+            motivo=MENSAJES[motivo],
+            codigo=motivo.value,
+        )
 
     # --- escrituras en línea de la web (pasan por el mismo camino) ---------------------------
     async def registrar_aplicacion(self, actor: Actor, s: e.NuevaAplicacion) -> e.Aplicacion:
@@ -167,3 +289,34 @@ class ServicioConsultaRegistro:
 
     async def actividad_reciente(self, actor: Actor, lote_id: int) -> list[e.ActividadReciente]:
         raise NoImplementado("Actividad reciente")
+
+
+# Columnas de dominio que el cliente puede aportar en una lectura (nombres de la BD).
+_DATOS_LECTURA = frozenset(
+    {
+        "visi_id",
+        "tram_id",
+        "ubic_id",
+        "lect_leida",
+        "lect_especimenes",
+        "lect_justificacion",
+        "cond_id",
+        "lect_fecha_cambio_cuerpo",
+        "lect_fecha_cambio_atrayente",
+        "atra_id",
+        "lect_observaciones",
+        "lect_precision_m",
+        "lect_coincide_lote",
+        "lect_motivo_correccion",
+    }
+)
+
+
+def _instante(valor: object) -> datetime:
+    if isinstance(valor, datetime):
+        return valor
+    return datetime.fromisoformat(str(valor).replace("Z", "+00:00"))
+
+
+def _linaje_de(actor: Actor) -> Linaje:
+    return Linaje.AUTORREPORTE if actor.rol.value == "PRODUCTOR" else Linaje.INSPECCION_OFICIAL
