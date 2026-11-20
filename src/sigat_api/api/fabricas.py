@@ -197,8 +197,8 @@ def servicio_consulta_registro(con: ConexionDep) -> ServicioConsultaRegistro:
 
 
 # ---------------------------------------------------------------- concepto, notificaciones, auditoría
-def servicio_concepto(con: ConexionDep) -> ServicioConcepto:
-    return ServicioConcepto(RepositorioConcepto(con))
+def servicio_concepto(con: ConexionDep, cfg: Configuracion = Depends(configuracion)) -> ServicioConcepto:
+    return ServicioConcepto(RepositorioConcepto(con), cfg.zona_horaria_predeterminada)
 
 
 def servicio_notificaciones(con: ConexionDep) -> ServicioNotificaciones:
