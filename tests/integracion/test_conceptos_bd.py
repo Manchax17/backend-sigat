@@ -100,16 +100,19 @@ INSERT INTO concepto_aptitud (conc_id, lote_id, peri_id, indi_id, conc_version, 
   (203, 11, 2, 103, 1, 'apto', DATE '2026-03-12', 1, '2026-03-12 21:00-05', NULL);
 
 INSERT INTO dispositivo (disp_id, disp_plataforma) VALUES ('00000000-0000-0000-0000-0000000000d1', 'android');
+WITH o AS (
+  INSERT INTO operacion_sync (disp_id, oper_cliente_id, usua_id, oper_entidad, oper_accion, oper_registro_id,
+                              oper_version, oper_hash_contenido, oper_clasificacion, oper_t_captura)
+  VALUES ('00000000-0000-0000-0000-0000000000d1', gen_random_uuid(), 2, 'etapa_declarada', 'crear',
+          '00000000-0000-0000-0000-00000000a002', 1, md5('a') || md5('b'), 'alta_nueva',
+          TIMESTAMPTZ '2026-03-08 08:05-05')
+  RETURNING oper_id
+)
 INSERT INTO etapa_declarada (etap_registro_id, lote_id, feno_id, etap_linaje, usua_id, disp_id, oper_id,
                              etap_t_observacion, etap_t_captura)
 SELECT '00000000-0000-0000-0000-00000000a002', 11, 1, 'autorreporte', 2, '00000000-0000-0000-0000-0000000000d1',
        o.oper_id, '2026-03-08 08:00-05', '2026-03-08 08:05-05'
-  FROM (INSERT INTO operacion_sync (disp_id, oper_cliente_id, usua_id, oper_entidad, oper_accion, oper_registro_id,
-                                    oper_version, oper_hash_contenido, oper_clasificacion, oper_t_captura)
-        VALUES ('00000000-0000-0000-0000-0000000000d1', gen_random_uuid(), 2, 'etapa_declarada', 'crear',
-                '00000000-0000-0000-0000-00000000a002', 1, md5('a') || md5('b'), 'alta_nueva',
-                TIMESTAMPTZ '2026-03-08 08:05-05')
-        RETURNING oper_id) o;
+  FROM o;
 """
 
 
