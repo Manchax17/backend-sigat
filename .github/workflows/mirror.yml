@@ -15,5 +15,5 @@ jobs:
 
       - name: Push to GitLab
         run: |
-          git remote add gitlab https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/TU_USUARIO/TU_PROYECTO.git
+          git remote add gitlab https://oauth2:${{ secrets.GITLAB_TOKEN }}@gitlab.com/manchax2005/backend-fork-sigat.git
           git push --force gitlab develop:develop
