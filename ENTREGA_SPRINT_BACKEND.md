@@ -44,7 +44,7 @@ Devuelve la información de la versión vigente del paquete de campo para saber 
   "pred_id": 1,
   "paqu_version": 1,
   "prog_id": 1,
-  "paqu_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "paqu_hash": "<sha-256 del contenido>",
   "generado_en": "2026-11-20T22:30:00Z",
   "invalidado_en": null,
   "tamano_bytes": null
@@ -199,8 +199,8 @@ Tal como se acordó en el refinamiento del sprint:
 
 Para el equipo de **Frontend Móvil** e **Integración**, el contenedor de desarrollo PostgreSQL (`puerto 5434`, base `sigat`) cuenta con el script semilla `backend-sigat/scripts/dev/seed_tecnico_pruebas.sql`:
 
-* **Usuario Técnico:** `tecnico.prueba` (contraseña: `Tecnico123!`, `pers_cc: 1098765432`)
-* **Usuario Agrónomo:** `agronomo.prueba` (contraseña: `Agronomo123!`, `pers_cc: 1098765433`)
+* **Usuario Técnico:** `tecnico.prueba` (contraseña: `Tecnico123!`, `pers_cc: 1098765432`) <!-- pragma: allowlist secret -->
+* **Usuario Agrónomo:** `agronomo.prueba` (contraseña: `Agronomo123!`, `pers_cc: 1098765433`) <!-- pragma: allowlist secret -->
 * **Predio:** ID `1` (*Finca El Duraznal de Prueba*, Pamplona, N. de S.)
 * **Lote:** ID `1` (*Lote 01 Durazno*)
 * **Trampas Asignadas:** 6 trampas oficiales con códigos ICA válidos:
