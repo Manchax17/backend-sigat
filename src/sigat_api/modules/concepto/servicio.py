@@ -3,7 +3,7 @@
 
 from datetime import date
 
-from sigat_api.compartido.errores import NoImplementado
+from sigat_api.compartido.errores import NoEncontrado, NoImplementado
 from sigat_api.compartido.tipos import Actor
 from sigat_api.modules.concepto import esquemas as e
 from sigat_api.modules.concepto.repositorio import RepositorioConcepto
@@ -20,12 +20,18 @@ class ServicioConcepto:
         raise NoImplementado("Reemisión del concepto")
 
     async def resumen_lote(self, actor: Actor, lote_id: int) -> e.ResumenLote:
-        raise NoImplementado("Resumen del lote")
+        datos = await self._repo.resumen(lote_id, actor.usua_id)
+        if datos is None:
+            raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
+        serie_filas = await self._repo.serie(lote_id, None, None, actor.usua_id)
+        datos["serie"] = [e.PuntoMtd(**sf) for sf in serie_filas]
+        return e.ResumenLote(**datos)
 
     async def serie_mtd(
         self, actor: Actor, lote_id: int, desde: date | None, hasta: date | None
     ) -> list[e.PuntoMtd]:
-        raise NoImplementado("Serie del MTD")
+        filas = await self._repo.serie(lote_id, desde, hasta, actor.usua_id)
+        return [e.PuntoMtd(**f) for f in filas]
 
     async def periodos(self, actor: Actor, lote_id: int) -> list[e.PeriodoTrampeo]:
         raise NoImplementado("Periodos")

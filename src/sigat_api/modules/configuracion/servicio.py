@@ -1,9 +1,12 @@
 """Casos de uso de configuración."""
 
+import hashlib
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
+
+import rfc8785
 
 from sigat_api.compartido.errores import Conflicto, NoEncontrado, NoImplementado, ReglaNegocio
 from sigat_api.compartido.tipos import Actor
@@ -30,10 +33,17 @@ class ServicioPredios:
         self._cola = cola
 
     async def listar(self, actor: Actor) -> list[e.Predio]:
-        raise NoImplementado("Predios")
+        filas = await self._repo.predios_visibles(actor.usua_id)
+        return [e.Predio(**f) for f in filas]
 
     async def obtener(self, actor: Actor, pred_id: int) -> e.Predio:
-        raise NoImplementado("Predio")
+        visible = await self._repo.predio_visible(actor.usua_id, pred_id)
+        if not visible:
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        fila = await self._repo.predio(pred_id)
+        if not fila:
+            raise NoEncontrado("El predio no existe.", codigo="PREDIO_NO_ENCONTRADO")
+        return e.Predio(**fila)
 
     async def actualizar(self, actor: Actor, pred_id: int, s: e.ActualizacionPredio) -> e.Predio:
         """Cartografía del admin (web ``updateFarm``). Invalida el paquete de campo."""
@@ -186,12 +196,16 @@ class ServicioTrampas:
             return e.BusquedaTrampa(
                 trampa=None,
                 en_catalogo=False,
+                pertenece_lote_activo=None,
+                dentro_del_lote=None,
                 advertencias=[f"El código {tram_codigo} no está en el catálogo de trampas."],
             )
         if not fila.get("con_ubicacion_vigente"):
             return e.BusquedaTrampa(
                 trampa=None,
                 en_catalogo=True,
+                pertenece_lote_activo=None,
+                dentro_del_lote=None,
                 advertencias=[f"La trampa {tram_codigo} no tiene ubicación vigente: no se puede validar."],
             )
 
@@ -370,7 +384,16 @@ class ServicioPrograma:
 
     async def vigente(self, actor: Actor, pred_id: int, fecha: date | None) -> e.ProgramaInspeccion:
         """Sin fecha = hoy en la zona horaria del predio. Con fecha = el que regía ese día (RF-024)."""
-        raise NoImplementado("Programa vigente")
+        visible = await self._repo.predio_visible(actor.usua_id, pred_id)
+        if not visible:
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        f = fecha or datetime.now(UTC).date()
+        fila = await self._repo.programa_vigente(pred_id, f)
+        if not fila:
+            raise NoEncontrado(
+                "El predio no tiene programa de inspección vigente.", codigo="SIN_PROGRAMA_VIGENTE"
+            )
+        return e.ProgramaInspeccion(**fila)
 
     async def de_lote(self, actor: Actor, lote_id: int) -> e.ProgramaInspeccion:
         """Móvil ``getInspectionConfig``."""
@@ -406,7 +429,13 @@ class ServicioPaqueteCampo:
         self._repo = repo
 
     async def info(self, actor: Actor, pred_id: int) -> e.PaqueteCampoInfo:
-        raise NoImplementado("Información del paquete")
+        visible = await self._repo.predio_visible(actor.usua_id, pred_id)
+        if not visible:
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        paquete = await self._repo.paquete_vigente(pred_id)
+        if paquete is None:
+            return await self.generar(pred_id, "Generación inicial bajo demanda")
+        return e.PaqueteCampoInfo(**paquete)
 
     async def contenido(
         self, actor: Actor, pred_id: int, si_no_coincide: str | None
@@ -414,8 +443,107 @@ class ServicioPaqueteCampo:
         """Devuelve None si ``If-None-Match`` coincide con el hash vigente (la ruta responde 304).
         RNF-020: tamaño acotado; el mapa base NO va aquí: el móvil lo descarga del proveedor
         según ``mapa_base.permite_descarga`` (licencia, UQQ-007)."""
-        raise NoImplementado("Contenido del paquete")
+        visible = await self._repo.predio_visible(actor.usua_id, pred_id)
+        if not visible:
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        paquete = await self._repo.paquete_vigente(pred_id)
+        if paquete is None:
+            info = await self.generar(pred_id, "Generación inicial bajo demanda")
+            paquete = info.model_dump()
+
+        paqu_hash = paquete["paqu_hash"].strip()
+        if si_no_coincide is not None:
+            etag = si_no_coincide.strip().strip('"')
+            if etag == paqu_hash:
+                return None
+
+        predio_dict = await self._repo.predio(pred_id)
+        if not predio_dict:
+            raise NoEncontrado("El predio no existe.", codigo="PREDIO_NO_ENCONTRADO")
+        predio = e.Predio(**predio_dict)
+
+        hoy = datetime.now(UTC).date()
+        ahora = datetime.now(UTC)
+        prog_dict = await self._repo.programa_vigente(pred_id, hoy)
+        if not prog_dict:
+            raise ReglaNegocio(
+                "El predio no tiene un programa de inspección vigente.", codigo="SIN_PROGRAMA_VIGENTE"
+            )
+        programa = e.ProgramaInspeccion(**prog_dict)
+
+        mapa_dict = await self._repo.mapa_predio(pred_id, ahora)
+        mapa = e.MapaPredio(**mapa_dict)
+
+        catalogos = await self._repo.catalogos_paquete()
+        limites = await self._repo.limites_predio(pred_id)
+        mapa_base = e.FuenteMapaBase(
+            estilo_url=None,
+            plantillas_teselas=[],
+            atribucion="© SIGAT / Instituto Colombiano Agropecuario",
+            permite_descarga=False,
+            zoom_min=12,
+            zoom_max=18,
+            limites=limites,
+        )
+
+        return e.PaqueteCampoContenido(
+            paqu_version=paquete["paqu_version"],
+            paqu_hash=paqu_hash,
+            generado_en=paquete["generado_en"],
+            predio=predio,
+            programa=programa,
+            mapa=mapa,
+            catalogos=catalogos,
+            mapa_base=mapa_base,
+        )
 
     async def generar(self, pred_id: int, motivo: str) -> e.PaqueteCampoInfo:
         """Tarea de la cola ``generar_paquete_campo``: invalida el anterior y registra uno nuevo."""
-        raise NoImplementado("Generar paquete")
+        predio_dict = await self._repo.predio(pred_id)
+        if not predio_dict:
+            raise NoEncontrado("El predio no existe.", codigo="PREDIO_NO_ENCONTRADO")
+        predio = e.Predio(**predio_dict)
+
+        hoy = datetime.now(UTC).date()
+        ahora = datetime.now(UTC)
+        prog_dict = await self._repo.programa_vigente(pred_id, hoy)
+        if not prog_dict:
+            raise ReglaNegocio(
+                "El predio no tiene un programa de inspección vigente para generar el paquete.",
+                codigo="SIN_PROGRAMA_VIGENTE",
+            )
+        programa = e.ProgramaInspeccion(**prog_dict)
+
+        mapa_dict = await self._repo.mapa_predio(pred_id, ahora)
+        mapa = e.MapaPredio(**mapa_dict)
+
+        catalogos = await self._repo.catalogos_paquete()
+        limites = await self._repo.limites_predio(pred_id)
+        mapa_base = e.FuenteMapaBase(
+            estilo_url=None,
+            plantillas_teselas=[],
+            atribucion="© SIGAT / Instituto Colombiano Agropecuario",
+            permite_descarga=False,
+            zoom_min=12,
+            zoom_max=18,
+            limites=limites,
+        )
+
+        await self._repo.invalidar_paquetes(pred_id, motivo)
+
+        payload = {
+            "predio": predio.model_dump(mode="json"),
+            "programa": programa.model_dump(mode="json"),
+            "mapa": mapa.model_dump(mode="json"),
+            "catalogos": catalogos,
+            "mapa_base": mapa_base.model_dump(mode="json"),
+        }
+        hash_hex = hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
+
+        paquete_info = await self._repo.registrar_paquete(
+            pred_id=pred_id,
+            prog_id=programa.prog_id,
+            hash_hex=hash_hex,
+            generado_en=ahora,
+        )
+        return e.PaqueteCampoInfo(**paquete_info)
