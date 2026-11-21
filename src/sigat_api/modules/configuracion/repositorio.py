@@ -942,6 +942,7 @@ RETURNING ubic_id
             datos["norma"] = None
             datos.pop("norm_codigo", None)
             datos.pop("norm_titulo", None)
+        datos.pop("norm_id", None)
 
         return datos
 
@@ -974,6 +975,7 @@ RETURNING ubic_id
             datos["norma"] = None
             datos.pop("norm_codigo", None)
             datos.pop("norm_titulo", None)
+        datos.pop("norm_id", None)
         return datos
 
     async def versiones_programa(self, pred_id: int) -> list[dict[str, Any]]:
@@ -1249,7 +1251,7 @@ RETURNING ubic_id
             ),
             (
                 "unidad_medida",
-                "SELECT unid_id, unid_descripcion, unid_simbolo FROM sigat.unidad_medida ORDER BY unid_id",
+                "SELECT unid_id, unid_nombre, unid_simbolo FROM sigat.unidad_medida ORDER BY unid_id",
             ),
         ]
         for nombre, sql in tablas:
