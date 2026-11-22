@@ -11,7 +11,7 @@ services:
       POSTGRES_DB: sigat
       POSTGRES_USER: ${SIGAT_DB_ADMIN_USUARIO:-sigat_admin}
       POSTGRES_PASSWORD: ${SIGAT_DB_ADMIN_CLAVE:?defina SIGAT_DB_ADMIN_CLAVE en .env}
-    ports: ["5432:5432"]
+    ports: ["5433:5432"]
     volumes:
       - db_datos:/var/lib/postgresql/data
     healthcheck:
