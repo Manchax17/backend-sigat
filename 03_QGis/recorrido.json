@@ -1,0 +1,6 @@
+{
+  "demo": false,
+  "aviso": "Sin recorrido registrado.",
+  "descripcion": "Recorrido real de la finca. Se agregaran puntos cuando se implemente el registro GPS.",
+  "puntos": []
+}

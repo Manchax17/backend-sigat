@@ -43,10 +43,44 @@ _RESTRICCIONES: dict[str, tuple[type[ErrorDominio], str, str]] = {
         "USUARIO_INVALIDO",
         "El usuario debe tener de 3 a 64 caracteres: letras, números, punto, guion, guion bajo o @.",
     ),
+    # trampas y su ubicación
+    "trampa_tram_codigo_key": (Conflicto, "CODIGO_TRAMPA_DUPLICADO", "Duplicidad de código de trampa."),
+    "trampa_codigo_formato": (
+        ReglaNegocio,
+        "CODIGO_TRAMPA_INVALIDO",
+        "El código debe tener el formato Divipola-ruta-número, por ejemplo 54518-602-001",
+    ),
+    "ubicacion_trampa_sin_solape": (
+        Conflicto,
+        "UBICACION_SOLAPADA",
+        "La trampa ya tiene una ubicación en ese periodo.",
+    ),
+    "trampa_atra_id_fkey": (ReglaNegocio, "ATRAYENTE_INVALIDO", "El atrayente no existe."),
+    "trampa_esta_id_fkey": (ReglaNegocio, "ESTADO_INVALIDO", "El estado no existe."),
+    "trampa_tram_tecnico_estado_id_fkey": (ReglaNegocio, "TECNICO_INVALIDO", "El técnico no existe."),
+    "trampa_tram_tecnico_actualizacion_id_fkey": (
+        ReglaNegocio,
+        "TECNICO_INVALIDO",
+        "El técnico no existe.",
+    ),
+    "ubicacion_trampa_tecn_id_fkey": (ReglaNegocio, "TECNICO_INVALIDO", "El técnico no existe."),
+    "ubicacion_trampa_vigi_id_fkey": (ReglaNegocio, "VIGILANCIA_INVALIDA", "La vigilancia no existe."),
+    "ubicacion_trampa_vigencia_valida": (
+        ReglaNegocio,
+        "UBICACION_FECHA_INVALIDA",
+        "La nueva ubicación debe empezar después de la ubicación vigente.",
+    ),
+    "trampa_tram_tecnico_registro_id_fkey": (ReglaNegocio, "TECNICO_INVALIDO", "El técnico no existe."),
     "centro_acopio_cent_descripcion_key": (
         Conflicto,
         "DUPLICADO",
         "Ya existe un centro de acopio con ese nombre.",
+    ),
+    # P-04 (bd/sql/16_regla_cosecha_abierta.sql): lo lanza trg_cosecha_una_abierta con SQLSTATE 23505.
+    "cosecha_una_abierta_por_lote": (
+        Conflicto,
+        "COSECHA_ABIERTA_EXISTENTE",
+        "El lote ya tiene una cosecha abierta: ciérrela o anúlela antes de registrar otra.",
     ),
 }
 

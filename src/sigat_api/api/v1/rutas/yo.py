@@ -7,36 +7,63 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Query, status
 
 from sigat_api.api.dependencias import ActorDep
-from sigat_api.api.fabricas import servicio_notificaciones, servicio_perfil
+from sigat_api.api.fabricas import (
+    servicio_lotes,
+    servicio_notificaciones,
+    servicio_perfil,
+    servicio_planificacion,
+    servicio_revision,
+)
 from sigat_api.api.v1 import esquemas_compuestos as c
 from sigat_api.api.v1.comunes import ERRORES, Cursor
 from sigat_api.compartido.esquemas import Pagina
+from sigat_api.compartido.tipos import RolCodigo
 from sigat_api.config import obtener_configuracion
+from sigat_api.modules.configuracion.servicio import ServicioLotes
 from sigat_api.modules.identidad import esquemas as ei
 from sigat_api.modules.identidad.servicio import ServicioPerfil
 from sigat_api.modules.notificaciones import esquemas as en
 from sigat_api.modules.notificaciones.servicio import ServicioNotificaciones
+from sigat_api.modules.planificacion.servicio import ServicioPlanificacion
+from sigat_api.modules.registro.servicio import ServicioRevision
 
 router = APIRouter(prefix="/yo", tags=["Mi cuenta"], responses=ERRORES)
 Perfil = Annotated[ServicioPerfil, Depends(servicio_perfil)]
 Notis = Annotated[ServicioNotificaciones, Depends(servicio_notificaciones)]
+Revision = Annotated[ServicioRevision, Depends(servicio_revision)]
+Planificacion = Annotated[ServicioPlanificacion, Depends(servicio_planificacion)]
+Lotes = Annotated[ServicioLotes, Depends(servicio_lotes)]
 
 
 @router.get("/inicio", response_model=c.InicioResumen, summary="Resumen de la pantalla de inicio de mi rol")
-async def inicio(actor: ActorDep, notis: Notis) -> c.InicioResumen:
-    """Fecha, «datos al» y avisos sin leer (ya funcionan).
+async def inicio(
+    actor: ActorDep, notis: Notis, revision: Revision, planificacion: Planificacion, lotes: Lotes
+) -> c.InicioResumen:
+    """Fecha, «datos al» y avisos sin leer.
 
-    PENDIENTE: los bloques ``tecnico`` / ``productor`` / ``agronomo`` componen conteos de lotes,
-    planificación, revisiones y sincronización; vendrán cuando esos módulos estén implementados.
-    Mientras tanto van en ``null`` (nunca con valores inventados).
+    Los bloques ``tecnico`` / ``productor`` / ``agronomo`` van en ``null`` (nunca valores
+    inventados) hasta que sus módulos estén implementados: ver CHANGELOG.md, «Pendientes
+    técnicos».
     """
     cfg = obtener_configuracion()
     ahora = datetime.now(UTC)
+
+    # Solo si el usuario creado es Agronomo calculamos sus 4 indicadores:
+    agronomo: c.InicioAgronomo | None = None
+    if actor.rol == RolCodigo.AGRONOMO_SUPERVISOR:
+        agronomo = c.InicioAgronomo(
+            registros_por_revisar=await revision.contar_por_revisar(actor),
+            planificaciones_pendientes=await planificacion.contar_pendientes(actor),
+            actividades_en_curso=await planificacion.contar_en_curso(actor),
+            lotes_sobre_umbral=await lotes.contar_sobre_umbral(actor),
+        )
+
     return c.InicioResumen(
         rol=actor.rol,
         fecha=ahora.astimezone(ZoneInfo(cfg.zona_horaria_predeterminada)).date(),
         datos_al=ahora,
         notificaciones_no_leidas=(await notis.conteo(actor)).no_leidas,
+        agronomo=agronomo,
     )
 
 

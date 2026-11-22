@@ -76,7 +76,7 @@ def test_instalacion_limpia_no_trae_cuentas(bd_limpia: str, h: SimpleNamespace) 
     assert h.consulta(
         bd_limpia, "SELECT 1 FROM sigat.categoria_notificacion WHERE cate_codigo = 'solicitudes_cuenta'"
     ) == [(1,)]
-    assert h.consulta(bd_limpia, "SELECT version_num FROM api.alembic_version") == [("0006",)]
+    assert h.consulta(bd_limpia, "SELECT version_num FROM api.alembic_version") == [("0008",)]
 
 
 def test_sin_cuentas_nadie_entra(api: TestClient) -> None:

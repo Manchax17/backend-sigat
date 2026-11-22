@@ -534,7 +534,7 @@ def test_downgrade_elimina_solo_sus_objetos_y_se_puede_reaplicar(h: SimpleNamesp
         r = h.alembic(nombre, "upgrade", "head")
         assert r.returncode == 0, r.stderr
         assert set(h.consulta(nombre, OBJETOS)) == completo
-        assert h.consulta(nombre, "SELECT version_num FROM api.alembic_version") == [("0006",)]
+        assert h.consulta(nombre, "SELECT version_num FROM api.alembic_version") == [("0008",)]
     finally:
         h.borrar_bd(nombre)
 
@@ -776,7 +776,13 @@ def test_casos_valores_nulos_segun_el_tipo_de_actividad(bd_casos: str, h: Simple
 # * Lote 12: C4 y C5 cerradas (C5 más reciente); C11 abierta pero ANULADA en su versión 2.
 # * Lote 13: C6 abierta (antigua) y C7 cerrada (más reciente) -> gana la abierta.
 # * Lote 21: sin cosechas.
+# Desde la revisión 0007 la base RECHAZA abrir C10 (trg_cosecha_una_abierta). El lote 11 representa
+# datos HISTÓRICOS cargados antes de la regla, que la 0007 conserva sin tocar; para reproducirlos, solo
+# este INSERT se hace con ese disparador desactivado (dentro de la transacción de ``ejecutar``) y se
+# vuelve a activar enseguida. Los demás disparadores (versión, append-only, auditoría) siguen activos.
+# La regla en sí se prueba en tests/integracion/test_regla_cosecha_abierta.py.
 COSECHAS = r"""
+ALTER TABLE cosecha DISABLE TRIGGER trg_cosecha_una_abierta;
 INSERT INTO cosecha (cose_registro_id, cose_version, lote_id, cose_fecha_esperada, cose_volumen_esperado, cose_fecha_real,
                      cose_volumen_real, cose_volumen_uni_id, usua_id, disp_id, oper_id, cose_t_observacion, cose_t_captura,
                      cose_anulada, cose_motivo_anulacion)
@@ -795,6 +801,7 @@ SELECT v.reg::uuid, v.ver, v.lote, v.esperada::date, 100, v.real_f::date, v.real
     (8, '00000000-0000-0000-0000-0000000f0007', 1, 13, '2026-05-01', '2026-05-02', '40', '2026-03-28 08:00-05', false, NULL)
   ) v(orden, reg, ver, lote, esperada, real_f, real_v, obs, anulada, motivo)
  ORDER BY v.orden;
+ALTER TABLE cosecha ENABLE TRIGGER trg_cosecha_una_abierta;
 """
 
 
@@ -823,6 +830,15 @@ def test_cosecha_vigente_por_lote(bd_cosechas: str, h: SimpleNamespace) -> None:
         (13, "00000000-0000-0000-0000-0000000f0006", 1, "2026-10-01", None, "kg", True, 1),
         (21, None, None, None, None, None, None, 0),
     ]
+
+
+def test_cosechas_historicas_no_dejan_la_regla_p04_desactivada(bd_cosechas: str, h: SimpleNamespace) -> None:
+    """COSECHAS desactiva trg_cosecha_una_abierta solo para cargar los datos históricos: debe quedar activo."""
+    assert h.consulta(
+        bd_cosechas,
+        "SELECT tgenabled::text FROM pg_trigger WHERE tgrelid = 'sigat.cosecha'::regclass "
+        "AND tgname = 'trg_cosecha_una_abierta'",
+    ) == [("O",)]
 
 
 def test_cosecha_vigente_usa_la_ultima_version(bd: str, h: SimpleNamespace) -> None:

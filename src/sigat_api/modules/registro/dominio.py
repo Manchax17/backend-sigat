@@ -13,8 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from sigat_api.compartido.errores import NoImplementado
-from sigat_api.compartido.tipos import AccionSync, ClasificacionOperacion
+from sigat_api.compartido.tipos import AccionSync, Actor, ClasificacionOperacion, Linaje, RolCodigo
 
 
 class MotivoRechazo(StrEnum):
@@ -58,21 +57,36 @@ class EstadoPrevio:
     hay_solapamiento: bool  # R-T5: otra medición del mismo tipo cubre esa ventana (lote+trampa)
 
 
+def decidir(
+    accion: AccionSync, version: int, t_observacion: datetime, previo: EstadoPrevio
+) -> tuple[ClasificacionOperacion, MotivoRechazo | None]:
+    if accion == AccionSync.CREAR:
+        if previo.version_vigente is not None:
+            return ClasificacionOperacion.RECHAZADA, MotivoRechazo.VERSION_INVALIDA
+        if previo.hay_solapamiento:
+            return ClasificacionOperacion.REVISAR, None
+        if (
+            previo.ultima_t_observacion_serie is not None
+            and t_observacion < previo.ultima_t_observacion_serie
+        ):
+            return ClasificacionOperacion.ALTA_RETROACTIVA, None
+        return ClasificacionOperacion.ALTA_NUEVA, None
+
+    if previo.version_vigente is None:
+        return ClasificacionOperacion.RECHAZADA, MotivoRechazo.REGISTRO_INEXISTENTE
+    if version != previo.version_vigente + 1:
+        return ClasificacionOperacion.RECHAZADA, MotivoRechazo.VERSION_INVALIDA
+    if previo.t_observacion_original is not None and t_observacion != previo.t_observacion_original:
+        return ClasificacionOperacion.RECHAZADA, MotivoRechazo.T_OBSERVACION_CAMBIADA
+    if previo.hay_solapamiento:
+        return ClasificacionOperacion.REVISAR, None
+    return ClasificacionOperacion.CORRECCION, None
+
+
 def clasificar(
     accion: AccionSync, version: int, t_observacion: datetime, previo: EstadoPrevio
 ) -> ClasificacionOperacion:
-    """Decide la clasificación de ADR-04 para una operación YA validada en forma y dominio.
-
-    Reglas que debe implementar (y probar en tests/modules/registro):
-    * R-T3: accion=corregir|anular y existe -> ``correccion`` si version == vigente + 1;
-      si no existe -> ``rechazada`` (REGISTRO_INEXISTENTE); si salta versiones -> ``rechazada``.
-    * ADR-02: en corrección, t_observacion != original -> ``rechazada`` (T_OBSERVACION_CAMBIADA).
-    * R-T5: hay_solapamiento -> ``revisar`` (no se elige ganador).
-    * R-T2: accion=crear y t_observacion < ultima_t_observacion_serie -> ``alta_retroactiva``.
-    * accion=crear en otro caso -> ``alta_nueva``.
-    La idempotencia (R-T4) y el conflicto de contenido se resuelven ANTES, en sincronización.
-    """
-    raise NoImplementado("Clasificación de la operación (motor temporal)")
+    return decidir(accion, version, t_observacion, previo)[0]
 
 
 def orden_canonico(
@@ -80,3 +94,7 @@ def orden_canonico(
 ) -> tuple[datetime, datetime, str]:
     """R-T1: t_observacion ascendente; desempata (t_captura, identificador). La llegada no participa."""
     return (t_observacion, t_captura, registro_id)
+
+
+def linaje_de(actor: Actor) -> Linaje:
+    return Linaje.AUTORREPORTE if actor.rol == RolCodigo.PRODUCTOR else Linaje.INSPECCION_OFICIAL

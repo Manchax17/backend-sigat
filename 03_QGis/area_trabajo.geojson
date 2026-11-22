@@ -1,0 +1,47 @@
+{
+  "type": "FeatureCollection",
+  "nombre": "Área de trabajo fhh",
+  "demo": false,
+  "aviso": "Datos registrados en SIGAT; no son datos de demostración.",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "nombre": "fhh",
+        "tipo": "area_trabajo",
+        "distancia_centro_a_lado_m": 200.0,
+        "lado_total_m": 400.0,
+        "finca_id": "1793217585869257",
+        "finca_nombre": "fhh",
+        "demo": false
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -72.6422658251728,
+              7.385322663352756
+            ],
+            [
+              -72.63864250726748,
+              7.385322663352756
+            ],
+            [
+              -72.63864250726748,
+              7.38891590805272
+            ],
+            [
+              -72.6422658251728,
+              7.38891590805272
+            ],
+            [
+              -72.6422658251728,
+              7.385322663352756
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

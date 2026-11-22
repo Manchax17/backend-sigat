@@ -49,7 +49,7 @@ def test_instalacion_limpia_siembra_los_4_escenarios_provisionales(
     bd_limpia: str, h: SimpleNamespace
 ) -> None:
     assert h.consulta(bd_limpia, ESCENARIOS) == ESPERADO
-    assert _version(h, bd_limpia) == [("0006",)]
+    assert _version(h, bd_limpia) == [("0008",)]
 
 
 def test_reaplicar_no_duplica(h: SimpleNamespace) -> None:
@@ -66,7 +66,7 @@ def test_reaplicar_no_duplica(h: SimpleNamespace) -> None:
         r = h.alembic(nombre, "upgrade", "head")
         assert r.returncode == 0, r.stderr
         assert h.consulta(nombre, ESCENARIOS) == ESPERADO
-        assert _version(h, nombre) == [("0006",)]
+        assert _version(h, nombre) == [("0008",)]
     finally:
         h.borrar_bd(nombre)
 

@@ -15,9 +15,35 @@ from sigat_api.main import crear_app  # noqa: E402
 
 DESTINO = RAIZ / "contracts" / "openapi.json"
 
+# CPython 3.13 renombró frases de razón a RFC 9110 (422 pasó de «Unprocessable
+# Entity» a «Unprocessable Content», entre otras). FastAPI las toma de
+# http.client.responses, así que el contrato generado dependía de la versión del
+# intérprete: el CI usa Python 3.12 y el desarrollo puede usar 3.13+. Se escribe
+# y se verifica siempre la forma RFC 9110 para que el contrato no cambie por
+# cambiar el intérprete (ver CHANGELOG.md, cierre Sprint 2).
+_FRASES_RFC9110 = {
+    "Request Entity Too Large": "Content Too Large",
+    "Request-URI Too Long": "URI Too Long",
+    "Requested Range Not Satisfiable": "Range Not Satisfiable",
+    "Unprocessable Entity": "Unprocessable Content",
+}
+
+
+def _normalizar_frases(esquema: object) -> object:
+    if isinstance(esquema, dict):
+        return {clave: _normalizar_frases(valor) for clave, valor in esquema.items()}
+    if isinstance(esquema, list):
+        return [_normalizar_frases(valor) for valor in esquema]
+    if isinstance(esquema, str):
+        return _FRASES_RFC9110.get(esquema, esquema)
+    return esquema
+
 
 def generar() -> str:
-    return json.dumps(crear_app().openapi(), ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    return (
+        json.dumps(_normalizar_frases(crear_app().openapi()), ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n"
+    )
 
 
 def main() -> int:

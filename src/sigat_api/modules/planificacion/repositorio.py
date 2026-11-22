@@ -3,6 +3,7 @@
 from typing import Any
 from uuid import UUID
 
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
 
 from sigat_api.compartido.errores import NoImplementado
@@ -48,3 +49,14 @@ class RepositorioPlanificacion:
 
     async def actividades_tecnico(self, filtros: dict[str, Any], cursor: str | None) -> Any:
         raise NoImplementado("Actividades de técnicos")
+
+    async def contar_por_estado(self, usua_id_creador: int, estado: str) -> int:
+        """Cuenta planificaciones creadas por el diagrama en un estado dado"""
+        sql = """
+        SELECT count(*)::int
+        FROM sigat.planificacion
+        WHERE usua_id_creador = :u
+          AND plan_estado = :estado
+        """
+        resultado = await self._con.scalar(text(sql), {"u": usua_id_creador, "estado": estado})
+        return int(resultado or 0)

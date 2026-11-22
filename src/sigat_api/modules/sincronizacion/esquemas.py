@@ -81,12 +81,12 @@ class ResultadoOperacion(Esquema):
 
 class RespuestaLote(Esquema):
     resultados: list[ResultadoOperacion]
-    cursor: str = Field(..., description="Avance para GET /sincronizacion/cambios?desde=…")
+    cursor: str = Field(..., description="Instante del servidor al confirmar el lote.")
     servidor_utc: datetime
 
 
 class OperacionPendiente(Esquema):
-    """Operaciones del usuario en ``revisar`` o ``rechazada`` sin resolver (bandeja del móvil)."""
+    """Operación recibida del usuario, con su clasificación y motivo."""
 
     oper_id: int
     cliente_id: UUID
@@ -99,27 +99,3 @@ class OperacionPendiente(Esquema):
     t_captura: datetime
     t_recepcion: datetime
     datos: dict[str, Any]
-
-
-class ResolucionOperacion(Esquema):
-    """Decisión humana sobre una operación ``revisar`` (R-T5). Crea una operación nueva que
-    apunta a la original (``oper_resuelve_oper_id``)."""
-
-    decision: Literal["confirmar", "descartar"]
-    motivo: str = Field(..., min_length=5, max_length=500)
-
-
-class CambioServidor(Esquema):
-    tipo: Literal["planificacion", "notificacion", "paquete_campo", "catalogo", "revision", "lectura"]
-    id: str
-    accion: Literal["creado", "actualizado", "invalidado"]
-    t: datetime
-
-
-class Cambios(Esquema):
-    """Bajada de cambios desde el servidor (lo que el móvil debe refrescar en su base local)."""
-
-    cursor: str
-    servidor_utc: datetime
-    cambios: list[CambioServidor]
-    hay_mas: bool

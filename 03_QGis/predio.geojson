@@ -1,0 +1,47 @@
+{
+  "type": "FeatureCollection",
+  "nombre": "fhh",
+  "demo": false,
+  "aviso": "Datos registrados en SIGAT; no son datos de demostración.",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "nombre": "fhh",
+        "area_hectareas": 5.11434912109375,
+        "id": "1793217585869257",
+        "area_definida_ha": 12.0,
+        "area_calculada_ha": 5.11434912109375,
+        "ubicacion": "dgg",
+        "demo": false
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -72.6417645325187,
+              7.386030487077917
+            ],
+            [
+              -72.64193171831387,
+              7.388369138593873
+            ],
+            [
+              -72.6399033704004,
+              7.388167315120128
+            ],
+            [
+              -72.63946920877562,
+              7.386724274267493
+            ],
+            [
+              -72.6417645325187,
+              7.386030487077917
+            ]
+          ]
+        ]
+      }
+    }
+  ]
+}

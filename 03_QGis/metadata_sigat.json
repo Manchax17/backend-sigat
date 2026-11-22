@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "finca": {
+    "id": "1793217585869257",
+    "nombre": "fhh",
+    "ubicacion": "dgg",
+    "hectareas": 12.0
+  },
+  "area_calculada_ha": 5.11434912109375,
+  "parcelas": [
+    {
+      "id": "1793217673509274",
+      "nombre": "Parcela 1",
+      "coordenadas": [
+        [
+          -72.64175412863466,
+          7.388172377233502
+        ],
+        [
+          -72.64110016661242,
+          7.388140529643962
+        ],
+        [
+          -72.64084909198638,
+          7.387309596574511
+        ],
+        [
+          -72.64082573622387,
+          7.386545252423829
+        ],
+        [
+          -72.64153808758954,
+          7.386365747284401
+        ]
+      ],
+      "distanciaArbolesMetros": 5.0,
+      "distanciaFilasMetros": 5.0
+    }
+  ],
+  "trampasPorParcela": {
+    "1793217673509274": [
+      {
+        "id": "1793217694242648",
+        "codigo": "RRE",
+        "fechaInstalacion": "2026-10-28",
+        "estado": "Activa",
+        "observaciones": "",
+        "longitud": -72.64151090357062,
+        "latitud": 7.387898339155058
+      }
+    ]
+  },
+  "resolucion_celdas_m": 80,
+  "nota": "celdas.geojson se genera automáticamente desde los límites reales de las parcelas; recorrido.json se conserva."
+}

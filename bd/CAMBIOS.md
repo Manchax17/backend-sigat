@@ -178,6 +178,31 @@ Ejecuta `bd/sql/15_semilla_permisos.sql`, también incluido en `00_instalar_todo
 - La auditoría `trg_aud_rol_permiso` registra cada par en `bitacora_auditoria` sin usuario, porque no hay actor durante una migración.
 - `downgrade` no borra filas: la matriz no se distingue con seguridad de una carga institucional idéntica.
 
+### Revisión `0007` — Regla P-04: una sola cosecha abierta por lote
+
+Ejecuta `bd/sql/16_regla_cosecha_abierta.sql`, también incluido en `00_instalar_todo.sql`. **Solo agrega** la función `sigat.fn_cosecha_una_abierta()` y el disparador `BEFORE INSERT` `trg_cosecha_una_abierta` sobre `sigat.cosecha`; no crea ni modifica tablas, columnas, restricciones, índices ni datos. Desde esta revisión la regla P-04 (decisión del responsable del proyecto, 2026-11-05), que la 0004 solo hacía visible en `v_cosecha_lote_vigente.cosechas_abiertas`, se impone en la base de datos.
+
+- Una cosecha está **abierta** cuando su versión vigente (la de mayor `cose_version`) no tiene `cose_fecha_real` y no está anulada, igual que en `v_cosecha_lote_vigente`.
+- Se rechaza solo la versión que **abre** una cosecha en un lote que ya tiene otra abierta: un alta nueva abierta, la reapertura de una cerrada o anulada, o una corrección que la cambia de lote.
+- Siempre se permite corregir la cosecha que ya está abierta (versión n+1 en el mismo lote), cerrarla y anularla. El versionamiento append-only (`trg_cosecha_ro`, `trg_cosecha_version`) no cambia.
+- No se usa un índice único parcial (el `ux_cosecha_abierta` del cronograma): cada corrección es una fila nueva, y el índice vería las versiones de la misma cosecha como dos abiertas e impediría corregirla.
+- Concurrencia: `pg_advisory_xact_lock` por lote serializa dos aperturas simultáneas en el mismo lote. Con el aislamiento READ COMMITTED del backend, la segunda transacción ve la primera ya confirmada y se rechaza.
+- Error: SQLSTATE `23505` con restricción `cosecha_una_abierta_por_lote`. `infra/db/errores_pg.py` lo traduce a **409 `COSECHA_ABIERTA_EXISTENTE`**.
+- **Datos históricos:** no se revisan, modifican ni borran. Si algún lote ya tiene más de una cosecha abierta, la migración emite un `WARNING` con los lotes y continúa; esas cosechas se pueden corregir, cerrar o anular, pero no se puede abrir otra hasta que quede una sola.
+- `downgrade` elimina solo el disparador y la función.
+
+### Revisión `0008` — Vistas de informe local y guarda geométrica
+
+Ejecuta `bd/sql/17_vistas_informe_local.sql`, también incluido en `00_instalar_todo.sql`. **Solo agrega** cuatro vistas de informe y reemplaza la función del disparador `sigat.fn_lote_geometria_valida`; no crea ni modifica tablas, columnas, restricciones, índices ni datos. Es idempotente (`CREATE OR REPLACE`).
+
+- `v_ultima_sincronizacion` (P01, P06, P07): última recepción y número de operaciones consolidadas por usuario y dispositivo (`dispositivo` × `operacion_sync`).
+- `v_operacion_confirmada` (P07b, P07c, P07d): resultado del servidor por operación del cliente y número de reenvíos (`recepcion_sync`, el más reciente por `rece_t`). Cierra el ciclo del móvil.
+- `v_mtd_por_lote_escenario` (P02, P02-P): serie del MTD por lote y escenario con umbral aplicado y contraste (`periodo_trampeo` × `v_mtd_vigente` × `escenario_trampeo` × `programa_umbral`).
+- `v_resumen_productor` (P01, P01-P, PW01): predio, lotes, MTD y escenario más recientes, y estado fitosanitario por lote (`predio` × `lote` × `v_resumen_lote`, lateral sobre `v_mtd_por_lote_escenario`). Solo lotes en predios cargados y con concepto vigente.
+- `fn_lote_geometria_valida`: la regla RF-084 sigue vigente, pero la contención solo se exige cuando `lotg_geom` se inserta o cambia (`IS DISTINCT FROM` en UPDATE). Cerrar una versión (`lotg_vigente_hasta`) o editar metadatos ya no revalida un polígono cargado. El resto del cuerpo no cambia.
+- Las vistas **no** son un mecanismo de autorización: devuelven todas las filas. El backend debe consultar solo con el filtro del usuario del token.
+- `downgrade` elimina las cuatro vistas y restaura la función sin la guarda (cuerpo de `04_funciones.sql` de la revisión 0001).
+
 ### Consideraciones de revisión
 
 Las modificaciones de restricciones de `operacion_sync` en los ajustes v8 y v9 amplían los valores permitidos para incorporar nuevas entidades sincronizables. Como utilizan `DROP CONSTRAINT` seguido de `ADD CONSTRAINT`, deben contar con revisión técnica y aprobación del responsable de la base de datos antes de integrarse.

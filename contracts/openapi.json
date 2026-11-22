@@ -981,83 +981,6 @@
         "title": "CambioContrasena",
         "type": "object"
       },
-      "CambioServidor": {
-        "additionalProperties": false,
-        "properties": {
-          "accion": {
-            "enum": [
-              "creado",
-              "actualizado",
-              "invalidado"
-            ],
-            "title": "Accion",
-            "type": "string"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "t": {
-            "format": "date-time",
-            "title": "T",
-            "type": "string"
-          },
-          "tipo": {
-            "enum": [
-              "planificacion",
-              "notificacion",
-              "paquete_campo",
-              "catalogo",
-              "revision",
-              "lectura"
-            ],
-            "title": "Tipo",
-            "type": "string"
-          }
-        },
-        "required": [
-          "tipo",
-          "id",
-          "accion",
-          "t"
-        ],
-        "title": "CambioServidor",
-        "type": "object"
-      },
-      "Cambios": {
-        "additionalProperties": false,
-        "description": "Bajada de cambios desde el servidor (lo que el móvil debe refrescar en su base local).",
-        "properties": {
-          "cambios": {
-            "items": {
-              "$ref": "#/components/schemas/CambioServidor"
-            },
-            "title": "Cambios",
-            "type": "array"
-          },
-          "cursor": {
-            "title": "Cursor",
-            "type": "string"
-          },
-          "hay_mas": {
-            "title": "Hay Mas",
-            "type": "boolean"
-          },
-          "servidor_utc": {
-            "format": "date-time",
-            "title": "Servidor Utc",
-            "type": "string"
-          }
-        },
-        "required": [
-          "cursor",
-          "servidor_utc",
-          "cambios",
-          "hay_mas"
-        ],
-        "title": "Cambios",
-        "type": "object"
-      },
       "CatalogoInfo": {
         "additionalProperties": false,
         "description": "Tarjeta del listado (web ``CatalogCard``).",
@@ -5011,7 +4934,7 @@
       },
       "OperacionPendiente": {
         "additionalProperties": false,
-        "description": "Operaciones del usuario en ``revisar`` o ``rechazada`` sin resolver (bandeja del móvil).",
+        "description": "Operación recibida del usuario, con su clasificación y motivo.",
         "properties": {
           "accion": {
             "$ref": "#/components/schemas/AccionSync"
@@ -6878,32 +6801,6 @@
         "title": "RegistroRevision",
         "type": "object"
       },
-      "ResolucionOperacion": {
-        "additionalProperties": false,
-        "description": "Decisión humana sobre una operación ``revisar`` (R-T5). Crea una operación nueva que\napunta a la original (``oper_resuelve_oper_id``).",
-        "properties": {
-          "decision": {
-            "enum": [
-              "confirmar",
-              "descartar"
-            ],
-            "title": "Decision",
-            "type": "string"
-          },
-          "motivo": {
-            "maxLength": 500,
-            "minLength": 5,
-            "title": "Motivo",
-            "type": "string"
-          }
-        },
-        "required": [
-          "decision",
-          "motivo"
-        ],
-        "title": "ResolucionOperacion",
-        "type": "object"
-      },
       "RespuestaLogin": {
         "additionalProperties": false,
         "description": "``token`` y ``user`` conservan esos nombres por compatibilidad con\n``UserSession.fromApi`` del móvil.",
@@ -6959,7 +6856,7 @@
         "additionalProperties": false,
         "properties": {
           "cursor": {
-            "description": "Avance para GET /sincronizacion/cambios?desde=…",
+            "description": "Instante del servidor al confirmar el lote.",
             "title": "Cursor",
             "type": "string"
           },
@@ -9276,7 +9173,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -9433,7 +9330,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -9541,7 +9438,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -9682,7 +9579,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -9797,7 +9694,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -9924,7 +9821,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -10041,7 +9938,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -10158,7 +10055,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -10275,7 +10172,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -10385,7 +10282,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -10501,7 +10398,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -10710,7 +10607,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -10820,7 +10717,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -10885,7 +10782,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "429": {
             "content": {
@@ -10996,7 +10893,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -11061,7 +10958,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "429": {
             "content": {
@@ -11129,7 +11026,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "429": {
             "content": {
@@ -11223,7 +11120,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "429": {
             "content": {
@@ -11341,7 +11238,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -11452,7 +11349,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -11582,7 +11479,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -11706,7 +11603,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -11847,7 +11744,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -11962,7 +11859,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -12089,7 +11986,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -12206,7 +12103,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -12317,7 +12214,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -12444,7 +12341,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -12618,7 +12515,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -12745,7 +12642,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -12872,7 +12769,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -12989,7 +12886,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -13136,7 +13033,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -13252,7 +13149,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -13376,7 +13273,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -13496,7 +13393,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -13622,7 +13519,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -13742,7 +13639,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -13875,7 +13772,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -13995,7 +13892,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -14119,7 +14016,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -14287,7 +14184,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -14441,7 +14338,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -14561,7 +14458,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -14690,7 +14587,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -14806,7 +14703,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -14922,7 +14819,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -15078,7 +14975,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -15193,7 +15090,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -15317,7 +15214,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -15444,7 +15341,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -15561,7 +15458,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -15688,7 +15585,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -15824,7 +15721,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -15951,7 +15848,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -16062,7 +15959,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -16178,7 +16075,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -16302,7 +16199,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -16428,7 +16325,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -16554,7 +16451,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -16687,7 +16584,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -16803,7 +16700,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -16938,7 +16835,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -17071,7 +16968,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -17191,7 +17088,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -17315,7 +17212,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -17431,7 +17328,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -17557,7 +17454,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -17664,7 +17561,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -17805,7 +17702,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -17922,7 +17819,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -18039,7 +17936,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -18166,7 +18063,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -18277,7 +18174,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -18336,143 +18233,6 @@
         "summary": "Listo para atender (BD, almacén, cola)",
         "tags": [
           "Sistema"
-        ]
-      }
-    },
-    "/api/v1/sincronizacion/cambios": {
-      "get": {
-        "operationId": "cambios_api_v1_sincronizacion_cambios_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "desde",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Desde"
-            }
-          },
-          {
-            "description": "Máximo de elementos por página.",
-            "in": "query",
-            "name": "limite",
-            "required": false,
-            "schema": {
-              "default": 100,
-              "description": "Máximo de elementos por página.",
-              "maximum": 200,
-              "minimum": 1,
-              "title": "Limite",
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Bearer <token de acceso>",
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Bearer <token de acceso>",
-              "title": "Authorization"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Cambios"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Not Found"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Unprocessable Entity"
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Not Implemented"
-          }
-        },
-        "summary": "Cambios del servidor desde un cursor (bajada)",
-        "tags": [
-          "Sincronización"
         ]
       }
     },
@@ -18574,7 +18334,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -18596,24 +18356,8 @@
     },
     "/api/v1/sincronizacion/operaciones": {
       "get": {
-        "operationId": "pendientes_api_v1_sincronizacion_operaciones_get",
+        "operationId": "operaciones_api_v1_sincronizacion_operaciones_get",
         "parameters": [
-          {
-            "in": "query",
-            "name": "clasificacion",
-            "required": false,
-            "schema": {
-              "default": [
-                "revisar",
-                "rechazada"
-              ],
-              "items": {
-                "$ref": "#/components/schemas/ClasificacionOperacion"
-              },
-              "title": "Clasificacion",
-              "type": "array"
-            }
-          },
           {
             "description": "Bearer <token de acceso>",
             "in": "header",
@@ -18641,7 +18385,7 @@
                   "items": {
                     "$ref": "#/components/schemas/OperacionPendiente"
                   },
-                  "title": "Response Pendientes Api V1 Sincronizacion Operaciones Get",
+                  "title": "Response Operaciones Api V1 Sincronizacion Operaciones Get",
                   "type": "array"
                 }
               }
@@ -18701,7 +18445,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -18715,133 +18459,7 @@
             "description": "Not Implemented"
           }
         },
-        "summary": "Mis operaciones en 'revisar' o 'rechazada'",
-        "tags": [
-          "Sincronización"
-        ]
-      }
-    },
-    "/api/v1/sincronizacion/operaciones/{oper_id}/resolucion": {
-      "post": {
-        "operationId": "resolver_api_v1_sincronizacion_operaciones__oper_id__resolucion_post",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "oper_id",
-            "required": true,
-            "schema": {
-              "title": "Oper Id",
-              "type": "integer"
-            }
-          },
-          {
-            "description": "Bearer <token de acceso>",
-            "in": "header",
-            "name": "authorization",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Bearer <token de acceso>",
-              "title": "Authorization"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ResolucionOperacion"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ResultadoOperacion"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "401": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Unauthorized"
-          },
-          "403": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Forbidden"
-          },
-          "404": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Not Found"
-          },
-          "409": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Conflict"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Unprocessable Entity"
-          },
-          "501": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Problema"
-                }
-              },
-              "application/problem+json": {}
-            },
-            "description": "Not Implemented"
-          }
-        },
-        "summary": "Confirmar o descartar una operación en 'revisar' (R-T5)",
+        "summary": "Consultar las operaciones recibidas y su resultado",
         "tags": [
           "Sincronización"
         ]
@@ -19012,7 +18630,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -19127,7 +18745,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -19298,7 +18916,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -19414,7 +19032,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -19538,7 +19156,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -19658,7 +19276,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -19782,7 +19400,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -19939,7 +19557,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -20054,7 +19672,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -20170,7 +19788,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -20294,7 +19912,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -20420,7 +20038,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -20536,7 +20154,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -20661,7 +20279,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -20781,7 +20399,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -20905,7 +20523,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21023,7 +20641,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21143,7 +20761,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21318,7 +20936,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21435,7 +21053,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21457,7 +21075,7 @@
     },
     "/api/v1/yo/inicio": {
       "get": {
-        "description": "Fecha, «datos al» y avisos sin leer (ya funcionan).\n\nPENDIENTE: los bloques ``tecnico`` / ``productor`` / ``agronomo`` componen conteos de lotes,\nplanificación, revisiones y sincronización; vendrán cuando esos módulos estén implementados.\nMientras tanto van en ``null`` (nunca con valores inventados).",
+        "description": "Fecha, «datos al» y avisos sin leer.\n\nLos bloques ``tecnico`` / ``productor`` / ``agronomo`` van en ``null`` (nunca valores\ninventados) hasta que sus módulos estén implementados: ver CHANGELOG.md, «Pendientes\ntécnicos».",
         "operationId": "inicio_api_v1_yo_inicio_get",
         "parameters": [
           {
@@ -21543,7 +21161,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21678,7 +21296,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21785,7 +21403,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21885,7 +21503,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -21994,7 +21612,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -22101,7 +21719,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -22208,7 +21826,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -22323,7 +21941,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -22434,7 +22052,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -22541,7 +22159,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {
@@ -22656,7 +22274,7 @@
               },
               "application/problem+json": {}
             },
-            "description": "Unprocessable Entity"
+            "description": "Unprocessable Content"
           },
           "501": {
             "content": {

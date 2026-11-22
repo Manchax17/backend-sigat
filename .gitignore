@@ -110,3 +110,21 @@ contracts/diff/
 
 # --- Scripts locales de prueba (no forman parte del producto) -----------------
 scripts/dev/
+
+# --- Artefactos de reorganización (no subir binarios derivados) ----------------
+build/
+__pycache__/
+*.pyc
+*.log
+*.zip
+*.xls
+*.xlsx
+*.png
+*.svg
+*.tex
+
+*.bak
+*.tmp
+*.orig
+~*
+.gitignore.bak

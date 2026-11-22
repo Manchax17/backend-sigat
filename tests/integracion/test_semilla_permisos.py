@@ -51,7 +51,7 @@ def test_instalacion_limpia_siembra_exactamente_la_matriz_de_permisos_py(
     assert h.consulta(bd_limpia, CONTEO) == [(25, 54)]
     assert {c for (c,) in h.consulta(bd_limpia, "SELECT perm_codigo FROM sigat.permiso")} == set(PERMISOS)
     assert _pares(h, bd_limpia) == ESPERADO
-    assert _version(h, bd_limpia) == [("0006",)]
+    assert _version(h, bd_limpia) == [("0008",)]
 
 
 def test_rol_permiso_por_rol_coincide_con_permisos_py(bd_limpia: str, h: SimpleNamespace) -> None:
@@ -96,7 +96,7 @@ def test_reaplicar_no_duplica_y_el_downgrade_no_borra(h: SimpleNamespace) -> Non
         assert r.returncode == 0, r.stderr
         assert h.consulta(nombre, CONTEO) == [(25, 54)]
         assert _pares(h, nombre) == ESPERADO
-        assert _version(h, nombre) == [("0006",)]
+        assert _version(h, nombre) == [("0008",)]
     finally:
         h.borrar_bd(nombre)
 

@@ -1,0 +1,31 @@
+{
+  "type": "FeatureCollection",
+  "nombre": "Trampas Jackson fhh",
+  "demo": false,
+  "aviso": "Datos registrados en SIGAT; no son datos de demostración.",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "1793217694242648",
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -72.64151090357062,
+          7.387898339155058
+        ]
+      },
+      "properties": {
+        "id": "1793217694242648",
+        "codigo_ica": "RRE",
+        "etiqueta": "RRE",
+        "tipo": "Jackson",
+        "lote_id": "1793217673509274",
+        "estado": "activa",
+        "fecha_instalacion": "2026-10-28",
+        "observaciones": "",
+        "finca_id": "1793217585869257",
+        "demo": false
+      }
+    }
+  ]
+}

@@ -309,7 +309,7 @@ class ServicioPerfil:
             rol=RolCodigo(str(f["rol_codigo"])),
             rol_descripcion=str(f["rol_descripcion"]),
             foto_arch_id=f["arch_id_foto"],
-            foto_url=None,  # PENDIENTE: URL firmada cuando el módulo de imágenes esté implementado
+            foto_url=None,
             actualizado_en=f["perf_actualizado_en"],
         )
 

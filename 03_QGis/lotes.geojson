@@ -1,0 +1,55 @@
+{
+  "type": "FeatureCollection",
+  "nombre": "Parcelas fhh",
+  "demo": false,
+  "aviso": "Datos registrados en SIGAT; no son datos de demostración.",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "1793217673509274",
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [
+          [
+            [
+              -72.64175412863466,
+              7.388172377233502
+            ],
+            [
+              -72.64110016661242,
+              7.388140529643962
+            ],
+            [
+              -72.64084909198638,
+              7.387309596574511
+            ],
+            [
+              -72.64082573622387,
+              7.386545252423829
+            ],
+            [
+              -72.64153808758954,
+              7.386365747284401
+            ],
+            [
+              -72.64175412863466,
+              7.388172377233502
+            ]
+          ]
+        ]
+      },
+      "properties": {
+        "id": "1793217673509274",
+        "nombre": "Parcela 1",
+        "estado": "registrado",
+        "finca_id": "1793217585869257",
+        "area_m2": 15562.64892578125,
+        "area_ha": 1.556264892578125,
+        "distancia_arboles_m": 5.0,
+        "distancia_filas_m": 5.0,
+        "arboles_estimados": 622,
+        "demo": false
+      }
+    }
+  ]
+}

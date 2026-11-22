@@ -55,8 +55,28 @@ def test_alembic_desde_cero_construye_el_mismo_esquema_que_psql(h: SimpleNamespa
         h.borrar_bd(por_psql)
 
 
+TABLAS_Y_VISTAS = "SELECT table_type, table_name FROM information_schema.tables WHERE table_schema='sigat'"
+# Las únicas TABLAS o VISTAS que las migraciones del backend agregan a ``sigat`` sobre una base v9 (las
+# demás siembran datos, crean el esquema ``api`` o, como la 0007, solo agregan funciones y disparadores;
+# la 0008 agrega estas cuatro vistas de informe local).
+VISTAS_0004 = {
+    ("VIEW", "v_actividad_lote_detalle"),
+    ("VIEW", "v_aplicacion_ultima_lote"),
+    ("VIEW", "v_cosecha_lote_vigente"),
+}
+VISTAS_0008 = {
+    ("VIEW", "v_ultima_sincronizacion"),
+    ("VIEW", "v_operacion_confirmada"),
+    ("VIEW", "v_mtd_por_lote_escenario"),
+    ("VIEW", "v_resumen_productor"),
+}
+
+
 def test_actualizar_base_v9_existente_no_pierde_datos(h: SimpleNamespace) -> None:
-    """Base instalada con el proyecto de BD (v9, antes de este backend) y con datos propios."""
+    """Base instalada con el proyecto de BD (v9, antes de este backend) y con datos propios.
+
+    Se comparan NOMBRES de tablas y vistas (no un conteo): ninguna tabla ni vista existente desaparece
+    y lo único nuevo son las vistas de la 0004. ``information_schema.tables`` incluye las vistas."""
     nombre = h.crear_bd()
     try:
         archivos = ("01", "02", "03", "04", "08", "09", "10", "11")
@@ -70,25 +90,25 @@ def test_actualizar_base_v9_existente_no_pierde_datos(h: SimpleNamespace) -> Non
         )
         h.psql(nombre, "-c", "INSERT INTO sigat.region (regi_descripcion) VALUES ('Región existente')")
         antes = h.consulta(nombre, "SELECT regi_id, regi_descripcion FROM sigat.region ORDER BY 1")
-        tablas_antes = h.consulta(
-            nombre, "SELECT count(*) FROM information_schema.tables WHERE table_schema='sigat'"
-        )
+        objetos_antes = set(h.consulta(nombre, TABLAS_Y_VISTAS))
 
         r = h.alembic(nombre, "upgrade", "head")
         assert r.returncode == 0, r.stderr
 
         assert h.consulta(nombre, "SELECT regi_id, regi_descripcion FROM sigat.region ORDER BY 1") == antes
-        assert (
-            h.consulta(nombre, "SELECT count(*) FROM information_schema.tables WHERE table_schema='sigat'")
-            == tablas_antes
-        )
+        objetos_despues = set(h.consulta(nombre, TABLAS_Y_VISTAS))
+        assert objetos_antes <= objetos_despues, {"desaparecen": sorted(objetos_antes - objetos_despues)}
+        assert objetos_despues - objetos_antes == VISTAS_0004 | VISTAS_0008
+        assert {o for o in objetos_despues if o[0] == "BASE TABLE"} == {
+            o for o in objetos_antes if o[0] == "BASE TABLE"
+        }
         assert h.consulta(
             nombre, "SELECT 1 FROM sigat.categoria_notificacion WHERE cate_codigo = 'solicitudes_cuenta'"
         ) == [(1,)]
         # Volver a aplicar no cambia nada.
         r = h.alembic(nombre, "upgrade", "head")
         assert r.returncode == 0, r.stderr
-        assert h.consulta(nombre, "SELECT version_num FROM api.alembic_version") == [("0006",)]
+        assert h.consulta(nombre, "SELECT version_num FROM api.alembic_version") == [("0008",)]
     finally:
         h.borrar_bd(nombre)
 
@@ -112,21 +132,16 @@ def test_esquema_sigat_de_otra_version_se_rechaza_sin_tocarlo(h: SimpleNamespace
 
 def test_downgrade_no_borra_el_esquema_institucional(h: SimpleNamespace) -> None:
     """Bajar a 0002 conserva TODAS las tablas y vistas institucionales. Lo único que desaparece son
-    las tres vistas que agrega la 0004 (su downgrade elimina solo sus propios objetos)."""
-    sql = "SELECT table_type, table_name FROM information_schema.tables WHERE table_schema='sigat'"
+    las vistas que agregan la 0004 y la 0008 (sus downgrades eliminan solo sus propios objetos)."""
     nombre = h.crear_bd()
     try:
         assert h.alembic(nombre, "upgrade", "head").returncode == 0
-        antes = set(h.consulta(nombre, sql))
+        antes = set(h.consulta(nombre, TABLAS_Y_VISTAS))
         r = h.alembic(nombre, "downgrade", "0002")
         assert r.returncode == 0, r.stderr
-        despues = set(h.consulta(nombre, sql))
+        despues = set(h.consulta(nombre, TABLAS_Y_VISTAS))
         assert despues <= antes
-        assert antes - despues == {
-            ("VIEW", "v_actividad_lote_detalle"),
-            ("VIEW", "v_aplicacion_ultima_lote"),
-            ("VIEW", "v_cosecha_lote_vigente"),
-        }
+        assert antes - despues == VISTAS_0004 | VISTAS_0008
         assert sum(1 for tipo, _ in despues if tipo == "BASE TABLE") == 74
     finally:
         h.borrar_bd(nombre)

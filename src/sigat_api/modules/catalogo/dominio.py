@@ -7,7 +7,7 @@ from dataclasses import dataclass
 class DefinicionCatalogo:
     codigo: str  # código en la URL /catalogos/{codigo}
     tabla: str  # tabla sigat
-    prefijo: str  # prefijo de columnas (docs/07_prefijos.md)
+    prefijo: str  # prefijo de columnas SIGAT
     titulo: str
     editable: bool  # editable desde la web (admin/agrónomo)
     columna_activo: str | None  # None = no admite retiro lógico (solo lectura)

@@ -1,0 +1,25 @@
+{
+  "type": "FeatureCollection",
+  "nombre": "Entrada fhh",
+  "demo": false,
+  "aviso": "Datos registrados en SIGAT; no son datos de demostración.",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "nombre": "fhh",
+        "tipo": "entrada",
+        "finca_id": "1793217585869257",
+        "finca_nombre": "fhh",
+        "demo": false
+      },
+      "geometry": {
+        "type": "Point",
+        "coordinates": [
+          -72.64071063923087,
+          7.386354263031905
+        ]
+      }
+    }
+  ]
+}
