@@ -20,11 +20,13 @@ def _ejecutar(coro: Any) -> Any:
 
 ACTOR_TECNICO = Actor(usua_id=2, rol=RolCodigo.TECNICO, disp_id=None, cliente=Cliente.MOVIL)
 
+LOTE_ID = 1
+
 
 class RepoFalsoConcepto:
     def __init__(self) -> None:
         self.datos_resumen: dict[str, Any] | None = {
-            "lote_id": 1,
+            "lote_id": LOTE_ID,
             "lote_descripcion": "Lote 01 Durazno",
             "mtd": Decimal("0.0500"),
             "mtd_es_estimacion": False,
@@ -47,22 +49,7 @@ class RepoFalsoConcepto:
             "rendimiento_estimado": Decimal("500.00"),
             "rendimiento_real": None,
             "hallazgos": 0,
-            "revision_pendiente": None,
-            "etapa": {
-                "derivada": "Floración",
-                "declarada": "Vegetativo",
-                "declarada_el": None,
-                "discrepancia": True,
-            },
-            "periodo_actual": {
-                "peri_id": 1,
-                "lote_id": 1,
-                "vigi_id": 1,
-                "prog_id": 1,
-                "peri_inicio": date(2026, 11, 1),
-                "peri_fin": date(2026, 11, 15),
-                "peri_estado": "abierto",
-            },
+            "visitas_por_revisar": 0,
         }
         self.serie_data: list[dict[str, Any]] = [
             {
@@ -78,16 +65,41 @@ class RepoFalsoConcepto:
                 "escenario": "Baja prevalencia",
             }
         ]
+        self.periodos_data: list[dict[str, Any]] = [
+            {
+                "peri_id": 1,
+                "lote_id": LOTE_ID,
+                "vigi_id": 1,
+                "prog_id": 1,
+                "peri_inicio": date(2026, 11, 1),
+                "peri_fin": date(2026, 11, 15),
+                "peri_estado": "abierto",
+            }
+        ]
+        self.etapa_data: dict[str, Any] = {
+            "derivada": "Floración",
+            "declarada": "Vegetativo",
+            "declarada_el": None,
+        }
 
-    async def resumen(self, lote_id: int, usua_id: int | None = None) -> dict[str, Any] | None:
+    async def lote_visible(self, usua_id: int | None, lote_id: int) -> bool:
+        return self.datos_resumen is not None and self.datos_resumen["lote_id"] == lote_id
+
+    async def resumen(self, usua_id: int | None, lote_id: int, zona: str) -> dict[str, Any] | None:
         if self.datos_resumen and self.datos_resumen["lote_id"] == lote_id:
             return dict(self.datos_resumen)
         return None
 
     async def serie(
-        self, lote_id: int, desde: date | None = None, hasta: date | None = None, usua_id: int | None = None
+        self, usua_id: int | None, lote_id: int, desde: date | None = None, hasta: date | None = None
     ) -> list[dict[str, Any]]:
         return list(self.serie_data)
+
+    async def periodos(self, lote_id: int) -> list[dict[str, Any]]:
+        return list(self.periodos_data)
+
+    async def etapa(self, lote_id: int, fecha: date | None, zona: str) -> dict[str, Any]:
+        return dict(self.etapa_data)
 
 
 @pytest.mark.regla
@@ -95,8 +107,8 @@ def test_resumen_lote_completo_con_serie() -> None:
     repo = RepoFalsoConcepto()
     svc = ServicioConcepto(repo)  # type: ignore[arg-type]
 
-    resumen = _ejecutar(svc.resumen_lote(ACTOR_TECNICO, 1))
-    assert resumen.lote_id == 1
+    resumen = _ejecutar(svc.resumen_lote(ACTOR_TECNICO, LOTE_ID))
+    assert resumen.lote_id == LOTE_ID
     assert resumen.mtd == Decimal("0.0500")
     assert resumen.umbral == Decimal("0.1000")
     assert resumen.contraste == ResultadoContraste.POR_DEBAJO_UMBRAL
