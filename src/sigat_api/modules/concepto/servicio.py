@@ -104,61 +104,20 @@ class ServicioConcepto:
         )
 
     async def _exigir_lote_visible(self, actor: Actor, lote_id: int) -> None:
-        # Soporta tanto repo.lote_visible(usua_id, lote_id) como repo.lote_visible(lote_id, usua_id)
-        try:
-            visible = await self._repo.lote_visible(actor.usua_id, lote_id)  # type: ignore[call-arg]
-        except TypeError:
-            visible = await self._repo.lote_visible(lote_id, actor.usua_id)  # type: ignore[call-arg]
-        if not visible:
+        if not await self._repo.lote_visible(actor.usua_id, lote_id):
             raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
 
     async def resumen_lote(self, actor: Actor, lote_id: int) -> e.ResumenLote:
         await self._exigir_lote_visible(actor, lote_id)
-        try:
-            fila = await self._repo.resumen(actor.usua_id, lote_id, self._zona)  # type: ignore[call-arg]
-        except TypeError:
-            fila = await self._repo.resumen(lote_id, actor.usua_id)  # type: ignore[call-arg]
+        fila = await self._repo.resumen(actor.usua_id, lote_id, self._zona)
 
         if fila is None:  # el lote no existe o no es visible
             raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
 
-        # Si el repositorio falso o directo ya armó etapa, periodo_actual y serie (ej. pruebas de resumen_lote)
-        if "etapa" in fila and isinstance(fila["etapa"], (dict, e.EtapaLote)):
-            etapa_val = (
-                fila["etapa"] if isinstance(fila["etapa"], e.EtapaLote) else e.EtapaLote(**fila["etapa"])
-            )
-            periodo_val = (
-                fila["periodo_actual"]
-                if isinstance(fila.get("periodo_actual"), (e.PeriodoTrampeo, type(None)))
-                else e.PeriodoTrampeo(**fila["periodo_actual"])
-            )
-            try:
-                serie_filas = await self._repo.serie(actor.usua_id, lote_id, None, None)  # type: ignore[call-arg]
-            except TypeError:
-                serie_filas = await self._repo.serie(lote_id, None, None, actor.usua_id)  # type: ignore[call-arg]
-            serie_val = [e.PuntoMtd(**sf) for sf in serie_filas]
-            datos = {k: v for k, v in fila.items() if k in e.ResumenLote.model_fields}
-            return e.ResumenLote(
-                **datos,
-                mtd_es_estimacion=False,
-                periodo_actual=periodo_val,
-                etapa=etapa_val,
-                revision_pendiente=fila.get("revision_pendiente"),
-                serie=serie_val,
-            )
-
         periodos = [e.PeriodoTrampeo(**p) for p in await self._repo.periodos(lote_id)]
-        try:
-            serie = [e.PuntoMtd(**p) for p in await self._repo.serie(actor.usua_id, lote_id, None, None)]  # type: ignore[call-arg]
-        except TypeError:
-            serie = [e.PuntoMtd(**p) for p in await self._repo.serie(lote_id, None, None, actor.usua_id)]  # type: ignore[call-arg]
-
-        try:
-            etapa_dict = await self._repo.etapa(lote_id, None, self._zona)  # type: ignore[call-arg]
-        except TypeError:
-            etapa_dict = await self._repo.etapa(lote_id, None)  # type: ignore[call-arg]
-
-        etapa = etapa_lote(etapa_dict) if isinstance(etapa_dict, dict) else etapa_dict
+        serie = [e.PuntoMtd(**p) for p in await self._repo.serie(actor.usua_id, lote_id, None, None)]
+        etapa_dict = await self._repo.etapa(lote_id, None, self._zona)
+        etapa = etapa_lote(etapa_dict)
         datos = {k: v for k, v in fila.items() if k in e.ResumenLote.model_fields}
         return e.ResumenLote(
             **datos,
@@ -177,10 +136,7 @@ class ServicioConcepto:
                 "La fecha inicial no puede ser posterior a la final.", codigo="RANGO_FECHAS_INVALIDO"
             )
         await self._exigir_lote_visible(actor, lote_id)
-        try:
-            filas = await self._repo.serie(actor.usua_id, lote_id, desde, hasta)  # type: ignore[call-arg]
-        except TypeError:
-            filas = await self._repo.serie(lote_id, desde, hasta, actor.usua_id)  # type: ignore[call-arg]
+        filas = await self._repo.serie(actor.usua_id, lote_id, desde, hasta)
         return [e.PuntoMtd(**f) for f in filas]
 
     async def periodos(self, actor: Actor, lote_id: int) -> list[e.PeriodoTrampeo]:
@@ -200,11 +156,7 @@ class ServicioConcepto:
     async def concepto_a_fecha(self, actor: Actor, lote_id: int, fecha: date) -> e.ConceptoAFecha:
         """RF-024: el estado que se habría obtenido ESE día, no el de hoy."""
         await self._exigir_lote_visible(actor, lote_id)
-        try:
-            fila = await self._repo.concepto_a_fecha(lote_id, fecha, self._zona)  # type: ignore[call-arg]
-        except TypeError:
-            fila = await self._repo.concepto_a_fecha(lote_id, fecha)  # type: ignore[call-arg]
-
+        fila = await self._repo.concepto_a_fecha(lote_id, fecha, self._zona)
         concepto = e.Concepto(**fila) if fila is not None else None
         return e.ConceptoAFecha(
             fecha_consulta=fecha, concepto=concepto, explicacion=explicar_concepto(concepto)
@@ -212,11 +164,7 @@ class ServicioConcepto:
 
     async def etapa(self, actor: Actor, lote_id: int, fecha: date | None) -> e.EtapaLote:
         await self._exigir_lote_visible(actor, lote_id)
-        try:
-            res = await self._repo.etapa(lote_id, fecha, self._zona)  # type: ignore[call-arg]
-        except TypeError:
-            res = await self._repo.etapa(lote_id, fecha)  # type: ignore[call-arg]
-        return etapa_lote(res) if isinstance(res, dict) else res
+        return etapa_lote(await self._repo.etapa(lote_id, fecha, self._zona))
 
     async def cultivo_productor(self, actor: Actor) -> e.CultivoProductor:
         """Solo PRODUCTOR: sus lotes (predios de los que es dueño)."""
