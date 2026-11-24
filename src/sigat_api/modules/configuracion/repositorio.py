@@ -943,7 +943,6 @@ RETURNING ubic_id
             datos.pop("norm_id", None)
             datos.pop("norm_codigo", None)
             datos.pop("norm_titulo", None)
-        datos.pop("norm_id", None)
 
         return datos
 
@@ -977,7 +976,6 @@ RETURNING ubic_id
             datos.pop("norm_id", None)
             datos.pop("norm_codigo", None)
             datos.pop("norm_titulo", None)
-        datos.pop("norm_id", None)
         return datos
 
     async def versiones_programa(self, pred_id: int) -> list[dict[str, Any]]:
