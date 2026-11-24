@@ -1,15 +1,19 @@
 """Casos de uso de configuración."""
 
+import hashlib
+import json
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sigat_api.compartido.errores import Conflicto, NoEncontrado, NoImplementado, ReglaNegocio
+import rfc8785
+
+from sigat_api.compartido.errores import Conflicto, NoEncontrado, ReglaNegocio
 from sigat_api.compartido.tipos import Actor
-from sigat_api.infra.cola.cola import Cola
+from sigat_api.infra.cola.cola import TAREA_GENERAR_PAQUETE, Cola
 from sigat_api.modules.configuracion import esquemas as e
-from sigat_api.modules.configuracion.dominio import error_codigo_trampa
+from sigat_api.modules.configuracion.dominio import error_codigo_trampa, reticula_valida
 from sigat_api.modules.configuracion.repositorio import RepositorioConfiguracion
 
 _TZ_COLOMBIA = ZoneInfo("America/Bogota")
@@ -24,32 +28,77 @@ def _trampa(fila: dict[str, Any]) -> e.Trampa:
     return e.Trampa(**{k: v for k, v in fila.items() if k not in _AUXILIARES_TRAMPA})
 
 
+async def _invalidar_y_encolar_paquete(
+    repo: Any,
+    cola: Cola | None,
+    pred_id: int,
+    motivo: str,
+) -> None:
+    """Invalida el paquete de campo vigente del predio y encola su regeneración (ADR-09)."""
+    invalidar = getattr(repo, "invalidar_paquetes", None)
+    if invalidar is not None:
+        await invalidar(pred_id, motivo)
+    if cola is not None:
+        await cola.encolar(
+            TAREA_GENERAR_PAQUETE,
+            {"pred_id": pred_id, "motivo": motivo},
+            clave_unica=f"paquete:{pred_id}",
+        )
+
+
 class ServicioPredios:
-    def __init__(self, repo: RepositorioConfiguracion, cola: Cola) -> None:
+    def __init__(self, repo: RepositorioConfiguracion, cola: Cola | None = None) -> None:
         self._repo = repo
         self._cola = cola
 
     async def listar(self, actor: Actor) -> list[e.Predio]:
-        raise NoImplementado("Predios")
+        filas = await self._repo.predios_visibles(actor.usua_id)
+        return [e.Predio(**f) for f in filas]
 
     async def obtener(self, actor: Actor, pred_id: int) -> e.Predio:
-        raise NoImplementado("Predio")
+        visible = await self._repo.predio_visible(actor.usua_id, pred_id)
+        if not visible:
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        fila = await self._repo.predio(pred_id)
+        if not fila:
+            raise NoEncontrado("El predio no existe.", codigo="PREDIO_NO_ENCONTRADO")
+        return e.Predio(**fila)
 
     async def actualizar(self, actor: Actor, pred_id: int, s: e.ActualizacionPredio) -> e.Predio:
         """Cartografía del admin (web ``updateFarm``). Invalida el paquete de campo."""
-        raise NoImplementado("Actualizar predio")
+        if not await self._repo.predio_visible(actor.usua_id, pred_id):
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        cambios = s.model_dump(exclude_unset=True)
+        if not cambios:
+            raise ReglaNegocio("Debe enviar al menos un campo para actualizar.", codigo="ACTUALIZACION_VACIA")
+        cambios["pred_fecha_actualizacion"] = datetime.now(_TZ_COLOMBIA).date()
+        await self._repo.actualizar_predio(pred_id, cambios)
+        await _invalidar_y_encolar_paquete(
+            self._repo, self._cola, pred_id, "Actualización de datos del predio"
+        )
+        return await self.obtener(actor, pred_id)
 
     async def poner_geometria(self, actor: Actor, pred_id: int, s: e.EntradaGeometria) -> e.Predio:
         """Valida SRID 4326, ST_IsValid y que contenga a los lotes vigentes. Invalida el paquete."""
-        raise NoImplementado("Geometría del predio")
+        if not await self._repo.predio_visible(actor.usua_id, pred_id):
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        geojson = json.dumps(s.geometria.model_dump(mode="json"))
+        await self._repo.actualizar_geometria_predio(pred_id, geojson)
+        await _invalidar_y_encolar_paquete(
+            self._repo, self._cola, pred_id, f"Cambio de geometría del predio: {s.motivo}"
+        )
+        return await self.obtener(actor, pred_id)
 
     async def mapa(self, actor: Actor, pred_id: int, instante: datetime | None) -> e.MapaPredio:
         """``instante`` permite ver el contorno vigente en una fecha pasada (ADR-06)."""
-        raise NoImplementado("Mapa del predio")
+        if not await self._repo.predio_visible(actor.usua_id, pred_id):
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        mapa_dict = await self._repo.mapa_predio(pred_id, instante or datetime.now(UTC))
+        return e.MapaPredio(**mapa_dict)
 
 
 class ServicioLotes:
-    def __init__(self, repo: RepositorioConfiguracion, cola: Cola) -> None:
+    def __init__(self, repo: RepositorioConfiguracion, cola: Cola | None = None) -> None:
         self._repo = repo
         self._cola = cola
 
@@ -81,7 +130,23 @@ class ServicioLotes:
 
     async def crear(self, actor: Actor, pred_id: int, s: e.NuevoLote) -> e.LoteDetalle:
         """(pred_id, lote_codigo) único. Si trae geometría, crea la versión 1."""
-        raise NoImplementado("Alta de lote")
+        if not await self._repo.predio_visible(actor.usua_id, pred_id):
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        if s.vari_id is not None and s.espc_id is None:
+            raise ReglaNegocio("No se puede asignar variedad sin especie.", codigo="VARIEDAD_SIN_ESPECIE")
+        lote_id = await self._repo.insertar_lote(pred_id, s.model_dump(exclude={"geometria"}))
+        if s.geometria is not None:
+            geojson = json.dumps(s.geometria.geometria.model_dump(mode="json"))
+            await self._repo.nueva_version_geometria(
+                lote_id,
+                geojson,
+                s.geometria.vigente_desde,
+                s.geometria.fuente,
+                s.geometria.motivo,
+                actor.usua_id,
+            )
+        await _invalidar_y_encolar_paquete(self._repo, self._cola, pred_id, f"Alta de lote {s.lote_codigo}")
+        return await self.obtener(actor, lote_id)
 
     async def actualizar(self, actor: Actor, lote_id: int, s: e.ActualizacionLote) -> e.LoteDetalle:
         """Actualiza solo los campos permitidos. El productor no se edita aquí (sale del predio).
@@ -130,17 +195,37 @@ class ServicioLotes:
             fila = {**actual, **{k: v for k, v in cambios.items() if k in actual}}
         if fila is None:
             raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
+
+        if fila.get("pred_id") is not None:
+            await _invalidar_y_encolar_paquete(
+                self._repo, self._cola, int(fila["pred_id"]), f"Actualización de lote {lote_id}"
+            )
         return e.LoteDetalle(**fila)
 
     async def geometrias(self, actor: Actor, lote_id: int) -> list[e.VersionGeometriaLote]:
         """Versiones de la geometría del lote (ADR-06)."""
-        raise NoImplementado("Versiones de geometría")
+        if not await self._repo.lote_visible(actor.usua_id, lote_id):
+            raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
+        filas = await self._repo.geometrias_lote(lote_id)
+        return [e.VersionGeometriaLote(**f) for f in filas]
 
     async def nueva_geometria(
         self, actor: Actor, lote_id: int, s: e.EntradaGeometria
     ) -> e.VersionGeometriaLote:
         """ADR-06: genera evento de cambio de área (puede afectar la normalización del MTD) e invalida paquete."""
-        raise NoImplementado("Nueva geometría de lote")
+        if not await self._repo.lote_visible(actor.usua_id, lote_id):
+            raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
+        pred_id = await self._repo.lote_predio(lote_id)
+        if pred_id is None:
+            raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
+        geojson = json.dumps(s.geometria.model_dump(mode="json"))
+        fila = await self._repo.nueva_version_geometria(
+            lote_id, geojson, s.vigente_desde, s.fuente, s.motivo, actor.usua_id
+        )
+        await _invalidar_y_encolar_paquete(
+            self._repo, self._cola, pred_id, f"Nueva geometría del lote {lote_id}: {s.motivo}"
+        )
+        return e.VersionGeometriaLote(**fila)
 
     async def contar_sobre_umbral(self, actor: Actor) -> int:
         """Total de lotes visibles que superan el umbral para este agronomo"""
@@ -148,7 +233,7 @@ class ServicioLotes:
 
 
 class ServicioTrampas:
-    def __init__(self, repo: RepositorioConfiguracion, cola: Cola) -> None:
+    def __init__(self, repo: RepositorioConfiguracion, cola: Cola | None = None) -> None:
         self._repo = repo
         self._cola = cola
 
@@ -186,12 +271,16 @@ class ServicioTrampas:
             return e.BusquedaTrampa(
                 trampa=None,
                 en_catalogo=False,
+                pertenece_lote_activo=None,
+                dentro_del_lote=None,
                 advertencias=[f"El código {tram_codigo} no está en el catálogo de trampas."],
             )
         if not fila.get("con_ubicacion_vigente"):
             return e.BusquedaTrampa(
                 trampa=None,
                 en_catalogo=True,
+                pertenece_lote_activo=None,
+                dentro_del_lote=None,
                 advertencias=[f"La trampa {tram_codigo} no tiene ubicación vigente: no se puede validar."],
             )
 
@@ -235,6 +324,7 @@ class ServicioTrampas:
 
         Que el punto caiga dentro del lote NO bloquea (RF-012): la respuesta lo informa en
         ``dentro_del_lote``. La trampa nace activa y a nombre del técnico de la ubicación inicial.
+        Invalida el paquete de campo del predio.
         """
         u = s.ubicacion
         pred_id = await self._predio_destino(actor, u)
@@ -260,6 +350,7 @@ class ServicioTrampas:
             },
             {**u.model_dump(), "pred_id": pred_id},
         )
+        await _invalidar_y_encolar_paquete(self._repo, self._cola, pred_id, f"Alta de trampa {s.tram_codigo}")
         return await self.obtener(actor, tram_id)
 
     async def _predio_destino(self, actor: Actor, u: e.NuevaUbicacion) -> int:
@@ -311,7 +402,7 @@ class ServicioTrampas:
         actualización; si no viene (p. ej. solo cambia el atrayente) ese campo queda nulo, porque el
         contrato no trae otro técnico. Quién hizo el cambio lo guarda la bitácora (``fn_auditar``).
         """
-        await self.obtener(actor, tram_id)
+        trampa = await self.obtener(actor, tram_id)
         cambios = s.model_dump(exclude_unset=True)
         if "atra_id" in cambios and cambios["atra_id"] is None:
             raise ReglaNegocio("El atrayente es obligatorio.", codigo="ATRAYENTE_INVALIDO")
@@ -325,6 +416,9 @@ class ServicioTrampas:
                 )
         if cambios:
             await self._repo.actualizar_trampa(tram_id, cambios)
+            await _invalidar_y_encolar_paquete(
+                self._repo, self._cola, trampa.pred_id, f"Actualización de trampa {trampa.tram_codigo}"
+            )
         return await self.obtener(actor, tram_id)
 
     async def ubicaciones(self, actor: Actor, tram_id: int) -> list[e.UbicacionTrampa]:
@@ -346,7 +440,7 @@ class ServicioTrampas:
         """Mueve la trampa a otro punto o lote: cierra la ubicación vigente con ``ubic_fecha_fin``
         y registra la nueva. La BD hace cumplir vigencia y solape (EXCLUDE).
 
-        Invalida el paquete de campo (pendiente: no se llama a ``invalidar_paquetes``).
+        Invalida el paquete de campo del predio y encola su regeneración.
         """
         trampa = await self._repo.trampa_por_id(actor.usua_id, tram_id)
         if trampa is None:
@@ -356,6 +450,12 @@ class ServicioTrampas:
         pred_id = await self._predio_destino(actor, s)
         await self._exigir_distancia_minima(pred_id, s, excluir_tram_id=tram_id)
         ubic_id = await self._repo.reubicar(tram_id, {**s.model_dump(), "pred_id": pred_id})
+        motivo = f"Reubicación de trampa {trampa.get('tram_codigo', tram_id)}"
+        await _invalidar_y_encolar_paquete(self._repo, self._cola, pred_id, motivo)
+        pred_anterior = trampa.get("pred_id")
+        if pred_anterior is not None and int(pred_anterior) != pred_id:
+            await _invalidar_y_encolar_paquete(self._repo, self._cola, int(pred_anterior), motivo)
+
         filas = await self._repo.ubicaciones(tram_id, actor.usua_id)
         for fila in filas:
             if fila["ubic_id"] == ubic_id:
@@ -364,20 +464,37 @@ class ServicioTrampas:
 
 
 class ServicioPrograma:
-    def __init__(self, repo: RepositorioConfiguracion, cola: Cola) -> None:
+    def __init__(self, repo: RepositorioConfiguracion, cola: Cola | None = None) -> None:
         self._repo = repo
         self._cola = cola
 
     async def vigente(self, actor: Actor, pred_id: int, fecha: date | None) -> e.ProgramaInspeccion:
         """Sin fecha = hoy en la zona horaria del predio. Con fecha = el que regía ese día (RF-024)."""
-        raise NoImplementado("Programa vigente")
+        visible = await self._repo.predio_visible(actor.usua_id, pred_id)
+        if not visible:
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        f = fecha or datetime.now(UTC).date()
+        fila = await self._repo.programa_vigente(pred_id, f)
+        if not fila:
+            raise NoEncontrado(
+                "El predio no tiene programa de inspección vigente.", codigo="SIN_PROGRAMA_VIGENTE"
+            )
+        return e.ProgramaInspeccion(**fila)
 
     async def de_lote(self, actor: Actor, lote_id: int) -> e.ProgramaInspeccion:
         """Móvil ``getInspectionConfig``."""
-        raise NoImplementado("Programa del lote")
+        if not await self._repo.lote_visible(actor.usua_id, lote_id):
+            raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
+        pred_id = await self._repo.lote_predio(lote_id)
+        if pred_id is None:
+            raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
+        return await self.vigente(actor, pred_id, None)
 
     async def versiones(self, actor: Actor, pred_id: int) -> list[e.ProgramaInspeccion]:
-        raise NoImplementado("Versiones del programa")
+        if not await self._repo.predio_visible(actor.usua_id, pred_id):
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        filas = await self._repo.versiones_programa(pred_id)
+        return [e.ProgramaInspeccion(**f) for f in filas]
 
     async def nueva_version(
         self, actor: Actor, pred_id: int, s: e.NuevaVersionPrograma
@@ -385,20 +502,63 @@ class ServicioPrograma:
         """Web ``saveNewVersion``. Reglas (fn_programa_valida + §5.3): vigente_desde no anterior a la
         versión vigente; RN-007 y RN-004 en rango; escenarios sin solape. NO cambia el pasado:
         los periodos ya calculados conservan su umbral (ADR-05). Invalida el paquete de campo."""
-        raise NoImplementado("Nueva versión del programa")
+        if not await self._repo.predio_visible(actor.usua_id, pred_id):
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        if not (7 <= s.periodo_lectura_dias <= 14):
+            raise ReglaNegocio(
+                "El periodo de lectura debe estar entre 7 y 14 días (RN-007).",
+                codigo="PERIODO_LECTURA_INVALIDO",
+            )
+        if not (40 <= s.distancia_min_trampas_m <= 60):
+            raise ReglaNegocio(
+                "La distancia mínima entre trampas debe estar entre 40 y 60 m (RN-004).",
+                codigo="DISTANCIA_TRAMPAS_INVALIDA",
+            )
+        actual = await self._repo.programa_vigente(pred_id, s.vigente_desde)
+        if actual is not None and s.vigente_desde < actual["vigente_desde"]:
+            raise ReglaNegocio(
+                "La fecha de vigencia no puede ser anterior a la versión vigente.",
+                codigo="VIGENCIA_PROGRAMA_INVALIDA",
+            )
+        fila = await self._repo.nueva_version_programa(pred_id, s.model_dump(), actor.usua_id)
+        await _invalidar_y_encolar_paquete(
+            self._repo, self._cola, pred_id, f"Nueva versión del programa: {s.motivo_cambio}"
+        )
+        return e.ProgramaInspeccion(**fila)
 
 
 class ServicioReticula:
-    def __init__(self, repo: RepositorioConfiguracion, cola: Cola) -> None:
+    def __init__(self, repo: RepositorioConfiguracion, cola: Cola | None = None) -> None:
         self._repo = repo
         self._cola = cola
 
     async def obtener(self, actor: Actor, pred_id: int) -> e.Reticula:
-        raise NoImplementado("Retícula")
+        if not await self._repo.predio_visible(actor.usua_id, pred_id):
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        fila = await self._repo.reticula(pred_id)
+        if fila is None:
+            raise NoEncontrado("El predio no tiene retícula configurada.", codigo="RETICULA_NO_ENCONTRADA")
+        return e.Reticula(**fila)
 
     async def crear(self, actor: Actor, pred_id: int, s: e.NuevaReticula) -> e.Reticula:
-        """422 'La retícula es menor que la distancia mínima entre trampas' si no cumple §5.3."""
-        raise NoImplementado("Alta de retícula")
+        """422 'La retícula es menor que la distancia mínima entre trampas' si no cumple §5.3.
+        Invalida el paquete de campo del predio."""
+        if not await self._repo.predio_visible(actor.usua_id, pred_id):
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        distancia = await self._repo.distancia_minima_trampas(pred_id, datetime.now(UTC).date())
+        if distancia is not None and not reticula_valida(s.resolucion_m, distancia):
+            raise ReglaNegocio(
+                "La retícula es menor o igual que la distancia mínima entre trampas.",
+                codigo="RETICULA_INVALIDA",
+            )
+        celdas: list[dict[str, Any]] = []
+        if s.celdas is not None:
+            celdas = [c.model_dump(mode="json") for c in s.celdas.features]
+        fila = await self._repo.insertar_reticula(pred_id, s.resolucion_m, s.fecha_corte_imagen, celdas)
+        await _invalidar_y_encolar_paquete(
+            self._repo, self._cola, pred_id, f"Nueva retícula de {s.resolucion_m} m"
+        )
+        return e.Reticula(**fila)
 
 
 class ServicioPaqueteCampo:
@@ -406,7 +566,13 @@ class ServicioPaqueteCampo:
         self._repo = repo
 
     async def info(self, actor: Actor, pred_id: int) -> e.PaqueteCampoInfo:
-        raise NoImplementado("Información del paquete")
+        visible = await self._repo.predio_visible(actor.usua_id, pred_id)
+        if not visible:
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        paquete = await self._repo.paquete_vigente(pred_id)
+        if paquete is None:
+            return await self.generar(pred_id, "Generación inicial bajo demanda")
+        return e.PaqueteCampoInfo(**paquete)
 
     async def contenido(
         self, actor: Actor, pred_id: int, si_no_coincide: str | None
@@ -414,8 +580,107 @@ class ServicioPaqueteCampo:
         """Devuelve None si ``If-None-Match`` coincide con el hash vigente (la ruta responde 304).
         RNF-020: tamaño acotado; el mapa base NO va aquí: el móvil lo descarga del proveedor
         según ``mapa_base.permite_descarga`` (licencia, UQQ-007)."""
-        raise NoImplementado("Contenido del paquete")
+        visible = await self._repo.predio_visible(actor.usua_id, pred_id)
+        if not visible:
+            raise NoEncontrado("El predio no existe o no tiene acceso a él.", codigo="PREDIO_NO_ENCONTRADO")
+        paquete = await self._repo.paquete_vigente(pred_id)
+        if paquete is None:
+            info = await self.generar(pred_id, "Generación inicial bajo demanda")
+            paquete = info.model_dump()
+
+        paqu_hash = paquete["paqu_hash"].strip()
+        if si_no_coincide is not None:
+            etag = si_no_coincide.strip().strip('"')
+            if etag == paqu_hash:
+                return None
+
+        predio_dict = await self._repo.predio(pred_id)
+        if not predio_dict:
+            raise NoEncontrado("El predio no existe.", codigo="PREDIO_NO_ENCONTRADO")
+        predio = e.Predio(**predio_dict)
+
+        hoy = datetime.now(UTC).date()
+        ahora = datetime.now(UTC)
+        prog_dict = await self._repo.programa_vigente(pred_id, hoy)
+        if not prog_dict:
+            raise ReglaNegocio(
+                "El predio no tiene un programa de inspección vigente.", codigo="SIN_PROGRAMA_VIGENTE"
+            )
+        programa = e.ProgramaInspeccion(**prog_dict)
+
+        mapa_dict = await self._repo.mapa_predio(pred_id, ahora)
+        mapa = e.MapaPredio(**mapa_dict)
+
+        catalogos = await self._repo.catalogos_paquete()
+        limites = await self._repo.limites_predio(pred_id)
+        mapa_base = e.FuenteMapaBase(
+            estilo_url=None,
+            plantillas_teselas=[],
+            atribucion="© SIGAT / Instituto Colombiano Agropecuario",
+            permite_descarga=False,
+            zoom_min=12,
+            zoom_max=18,
+            limites=limites,
+        )
+
+        return e.PaqueteCampoContenido(
+            paqu_version=paquete["paqu_version"],
+            paqu_hash=paqu_hash,
+            generado_en=paquete["generado_en"],
+            predio=predio,
+            programa=programa,
+            mapa=mapa,
+            catalogos=catalogos,
+            mapa_base=mapa_base,
+        )
 
     async def generar(self, pred_id: int, motivo: str) -> e.PaqueteCampoInfo:
         """Tarea de la cola ``generar_paquete_campo``: invalida el anterior y registra uno nuevo."""
-        raise NoImplementado("Generar paquete")
+        predio_dict = await self._repo.predio(pred_id)
+        if not predio_dict:
+            raise NoEncontrado("El predio no existe.", codigo="PREDIO_NO_ENCONTRADO")
+        predio = e.Predio(**predio_dict)
+
+        hoy = datetime.now(UTC).date()
+        ahora = datetime.now(UTC)
+        prog_dict = await self._repo.programa_vigente(pred_id, hoy)
+        if not prog_dict:
+            raise ReglaNegocio(
+                "El predio no tiene un programa de inspección vigente para generar el paquete.",
+                codigo="SIN_PROGRAMA_VIGENTE",
+            )
+        programa = e.ProgramaInspeccion(**prog_dict)
+
+        mapa_dict = await self._repo.mapa_predio(pred_id, ahora)
+        mapa = e.MapaPredio(**mapa_dict)
+
+        catalogos = await self._repo.catalogos_paquete()
+        limites = await self._repo.limites_predio(pred_id)
+        mapa_base = e.FuenteMapaBase(
+            estilo_url=None,
+            plantillas_teselas=[],
+            atribucion="© SIGAT / Instituto Colombiano Agropecuario",
+            permite_descarga=False,
+            zoom_min=12,
+            zoom_max=18,
+            limites=limites,
+        )
+
+        await self._repo.invalidar_paquetes(pred_id, motivo)
+
+        payload = {
+            "predio": predio.model_dump(mode="json"),
+            "programa": programa.model_dump(mode="json"),
+            "mapa": mapa.model_dump(mode="json"),
+            "catalogos": catalogos,
+            "mapa_base": mapa_base.model_dump(mode="json"),
+        }
+        hash_hex = hashlib.sha256(rfc8785.dumps(payload)).hexdigest()
+
+        paquete_info = await self._repo.registrar_paquete(
+            pred_id=pred_id,
+            prog_id=programa.prog_id,
+            hash_hex=hash_hex,
+            generado_en=ahora,
+        )
+        return e.PaqueteCampoInfo(**paquete_info)

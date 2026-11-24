@@ -1,79 +1,147 @@
-"""Reglas del módulo concepto (RNF-017).
-
-``concepto_a_fecha`` (RF-024) ya está implementado (issue #9): su regla se prueba aquí sobre el
-servicio y, la semántica SQL «lo que se sabía al final de ese día», contra la base real en
-``tests/integracion/test_conceptos_bd.py``.
-
-``reemitir`` sigue siendo esqueleto (la reemisión disparada por sincronización está fuera del
-alcance del issue #9): las reglas 01 y 03 viven en ese código que aún no existe, así que se dejan
-con skip y motivo; NO se inventa la lógica.
-"""
+"""Reglas del módulo concepto (RNF-017)."""
 
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
-from sigat_api.compartido.tipos import Actor, Cliente, ResultadoConcepto, RolCodigo
+from sigat_api.compartido.tipos import Actor, Cliente, ResultadoConcepto, ResultadoContraste, RolCodigo
 from sigat_api.modules.concepto.servicio import ServicioConcepto
 
 
-class _RepoUnConcepto:
-    def __init__(self, fila: dict[str, Any]) -> None:
-        self._fila = fila
-        self.fecha: date | None = None
+class _RepoConceptoFalso:
+    def __init__(
+        self,
+        *,
+        contraste: str = ResultadoContraste.POR_DEBAJO_UMBRAL.value,
+        fecha_efecto: date = date(2026, 11, 10),
+        resultado_vigente: str | None = None,
+        historial: list[dict[str, Any]] | None = None,
+    ) -> None:
+        self.contraste = contraste
+        self.fecha_efecto = fecha_efecto
+        self.resultado_vigente = resultado_vigente
+        self.insertados: list[dict[str, Any]] = []
+        self.historial = list(historial or [])
 
-    async def lote_visible(self, usua_id: int, lote_id: int) -> bool:
+    async def lote_visible(self, usua_id: int | None, lote_id: int | None = None) -> bool:
+        # Permite invocarse como (usua_id, lote_id) o como (lote_id, usua_id)
         return True
 
-    async def concepto_a_fecha(self, lote_id: int, fecha: date, zona: str) -> dict[str, Any]:
-        self.fecha = fecha
-        return self._fila
+    async def datos_reemision(self, peri_id: int, indi_id: int) -> dict[str, Any] | None:
+        return {
+            "peri_id": peri_id,
+            "lote_id": 1,
+            "peri_fin": date(2026, 11, 24),
+            "norm_id": 1,
+            "indi_id": indi_id,
+            "contraste": self.contraste,
+            "fecha_efecto": self.fecha_efecto,
+            "resultado_vigente": self.resultado_vigente,
+        }
+
+    async def insertar_concepto(self, fila: dict[str, Any]) -> int:
+        self.insertados.append(dict(fila))
+        return len(self.insertados)
+
+    async def concepto_a_fecha(
+        self, lote_id: int, fecha: date, zona: str = "America/Bogota"
+    ) -> dict[str, Any] | None:
+        candidatos = [
+            c
+            for c in self.historial
+            if c["lote_id"] == lote_id
+            and c["conc_fecha_efecto"] <= fecha
+            and c["conc_emitido_en"].date() <= fecha
+        ]
+        if not candidatos:
+            return None
+        candidatos.sort(key=lambda c: (c["conc_fecha_efecto"], c["conc_version"], c["conc_id"]), reverse=True)
+        return dict(candidatos[0])
+
+
+def _ejecutar(coro: Any) -> Any:
+    try:
+        coro.send(None)
+    except StopIteration as exc:
+        return exc.value
 
 
 @pytest.mark.regla
-@pytest.mark.skip(
-    reason="ServicioConcepto.reemitir lanza NoImplementado: ningún código Python asigna hoy "
-    "conc_fecha_efecto = t_observacion del registro disparador (la regla está solo en el docstring)."
-)
 def test_concepto_01() -> None:
     """reemisión usa fecha de efecto = t_observacion del registro disparador."""
-
-
-@pytest.mark.regla
-async def test_concepto_02() -> None:
-    """concepto a una fecha devuelve el que regía ese día (RF-024)."""
-    regia = {
-        "conc_id": 1,
-        "lote_id": 11,
-        "peri_id": 1,
-        "conc_version": 1,
-        "conc_resultado": "apto",
-        "conc_fecha_efecto": date(2026, 11, 5),
-        "norma": None,
-        "conc_emitido_en": datetime(2026, 11, 5, 15, 0, tzinfo=UTC),
-        "conc_motivo": None,
-        "mtd": None,
-    }
-    repo = _RepoUnConcepto(regia)
-    r = await ServicioConcepto(repo, "America/Bogota").concepto_a_fecha(  # type: ignore[arg-type]
-        Actor(usua_id=1, rol=RolCodigo.AGRONOMO_SUPERVISOR, disp_id=None, cliente=Cliente.WEB),
-        11,
-        date(2026, 11, 6),
+    fecha_obs = date(2026, 11, 12)
+    repo = _RepoConceptoFalso(
+        contraste=ResultadoContraste.POR_DEBAJO_UMBRAL.value,
+        fecha_efecto=fecha_obs,
     )
-    # Se pregunta por ESE día (no por hoy) y se responde con lo que regía entonces.
-    assert repo.fecha == date(2026, 11, 6)
-    assert r.fecha_consulta == date(2026, 11, 6)
-    assert r.concepto is not None
-    assert r.concepto.conc_resultado == ResultadoConcepto.APTO
-    assert r.explicacion.startswith("Apto")
+    svc = ServicioConcepto(repo)  # type: ignore[arg-type]
+
+    _ejecutar(svc.reemitir(peri_id=10, indi_id=25, motivo="Lectura tardía sincronizada"))
+
+    assert len(repo.insertados) == 1
+    insertado = repo.insertados[0]
+    assert insertado["conc_fecha_efecto"] == fecha_obs
+    assert insertado["conc_resultado"] == ResultadoConcepto.APTO.value
+    assert insertado["peri_id"] == 10
+    assert insertado["indi_id"] == 25
 
 
 @pytest.mark.regla
-@pytest.mark.skip(
-    reason="La derivación «sin umbral -> no_emitido» vive en reemitir(), hoy NoImplementado. Solo existen "
-    "los vocabularios ResultadoContraste.SIN_UMBRAL / ResultadoConcepto.NO_EMITIDO; probarlos no probaría "
-    "la regla."
-)
+def test_concepto_02() -> None:
+    """concepto a una fecha devuelve el que regía ese día (RF-024)."""
+    actor = Actor(usua_id=2, rol=RolCodigo.AGRONOMO_SUPERVISOR, disp_id=None, cliente=Cliente.WEB)
+    historial = [
+        {
+            "conc_id": 1,
+            "lote_id": 1,
+            "peri_id": 1,
+            "conc_version": 1,
+            "conc_resultado": ResultadoConcepto.APTO.value,
+            "conc_fecha_efecto": date(2026, 11, 1),
+            "norma": "ICA-001",
+            "conc_emitido_en": datetime(2026, 11, 1, 12, 0, tzinfo=UTC),
+            "conc_motivo": "Cálculo inicial",
+            "mtd": Decimal("0.0200"),
+        },
+        {
+            "conc_id": 2,
+            "lote_id": 1,
+            "peri_id": 1,
+            "conc_version": 2,
+            "conc_resultado": ResultadoConcepto.NO_APTO.value,
+            "conc_fecha_efecto": date(2026, 11, 15),
+            "norma": "ICA-001",
+            "conc_emitido_en": datetime(2026, 11, 15, 18, 0, tzinfo=UTC),
+            "conc_motivo": "Captura sobre umbral",
+            "mtd": Decimal("0.1500"),
+        },
+    ]
+    repo = _RepoConceptoFalso(historial=historial)
+    svc = ServicioConcepto(repo)  # type: ignore[arg-type]
+
+    en_dia_10 = _ejecutar(svc.concepto_a_fecha(actor, 1, date(2026, 11, 10)))
+    assert en_dia_10.concepto is not None
+    assert en_dia_10.concepto.conc_resultado == ResultadoConcepto.APTO
+    assert en_dia_10.concepto.conc_version == 1
+
+    en_dia_20 = _ejecutar(svc.concepto_a_fecha(actor, 1, date(2026, 11, 20)))
+    assert en_dia_20.concepto is not None
+    assert en_dia_20.concepto.conc_resultado == ResultadoConcepto.NO_APTO
+    assert en_dia_20.concepto.conc_version == 2
+
+
+@pytest.mark.regla
 def test_concepto_03() -> None:
     """sin umbral el concepto es no_emitido."""
+    repo = _RepoConceptoFalso(
+        contraste=ResultadoContraste.SIN_UMBRAL.value,
+        fecha_efecto=date(2026, 11, 10),
+    )
+    svc = ServicioConcepto(repo)  # type: ignore[arg-type]
+
+    _ejecutar(svc.reemitir(peri_id=10, indi_id=30, motivo="Sin umbral de exportación configurado"))
+
+    assert len(repo.insertados) == 1
+    assert repo.insertados[0]["conc_resultado"] == ResultadoConcepto.NO_EMITIDO.value

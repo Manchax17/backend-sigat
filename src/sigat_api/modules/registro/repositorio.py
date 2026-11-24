@@ -1,17 +1,5 @@
-"""Acceso a datos del núcleo de registro. SOLO INSERT en tablas versionadas (ADR-03).
-
-Visibilidad de las consultas (la decide SIEMPRE el servidor, RNF-015):
-* Una visita es visible si el actor es el técnico que la hizo (``solo_propias``) o, para los
-  demás roles, si alguno de sus lotes está en ``fn_lotes_visibles(:u)``. El técnico ve sus
-  visitas aunque la asignación del lote ya haya terminado: es su propio historial.
-* Una lectura es visible si su visita es visible.
-* La revisión del agrónomo se acota por predio (``v_acceso_predio``), igual que
-  ``contar_por_revisar`` y ``v_registro_campo``.
-Lo que no es visible se trata como inexistente (404, nunca 403) para no revelar datos ajenos.
-"""
-
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -20,6 +8,39 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from sigat_api.compartido.errores import NoImplementado
 from sigat_api.modules.registro.dominio import EstadoPrevio
+
+_COLUMNAS_LECTURA = frozenset(
+    {
+        "lect_registro_id",
+        "lect_version",
+        "visi_id",
+        "tram_id",
+        "ubic_id",
+        "lect_leida",
+        "lect_especimenes",
+        "lect_justificacion",
+        "cond_id",
+        "lect_fecha_cambio_cuerpo",
+        "lect_fecha_cambio_atrayente",
+        "atra_id",
+        "lect_observaciones",
+        "lect_precision_m",
+        "lect_coincide_lote",
+        "lect_linaje",
+        "lect_anulada",
+        "lect_motivo_anulacion",
+        "lect_motivo_correccion",
+    }
+)
+
+_COLUMNAS_LECTURA_SERVIDOR = {
+    "usua_id",
+    "disp_id",
+    "oper_id",
+    "lect_t_observacion",
+    "lect_t_captura",
+    "lect_deriva_reloj_seg",
+}
 
 Clave = tuple[datetime, UUID, int | None]
 
@@ -219,17 +240,133 @@ class RepositorioRegistro:
         tram_id: int | None,
         t_observacion: datetime,
     ) -> EstadoPrevio:
-        """Versión vigente del registro lógico + última t_observacion de la serie + solapamiento (R-T5)."""
-        raise NoImplementado("Estado previo del registro")
+        if entidad == "visita":
+            existe = await self._con.scalar(
+                text("SELECT 1 FROM sigat.visita WHERE visi_id = :v"), {"v": registro_id}
+            )
+            return EstadoPrevio(
+                version_vigente=1 if existe else None,
+                t_observacion_original=None,
+                ultima_t_observacion_serie=None,
+                hay_solapamiento=False,
+            )
+
+        if entidad != "lectura_trampa":
+            return EstadoPrevio(None, None, None, False)
+
+        vigente = (
+            (
+                await self._con.execute(
+                    text(
+                        """
+SELECT lect_version, lect_t_observacion
+  FROM sigat.lectura_trampa
+ WHERE lect_registro_id = :r
+ ORDER BY lect_version DESC
+ LIMIT 1
+"""
+                    ),
+                    {"r": registro_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if vigente is None:
+            return EstadoPrevio(None, None, None, False)
+
+        original = await self._con.scalar(
+            text(
+                "SELECT lect_t_observacion FROM sigat.lectura_trampa"
+                " WHERE lect_registro_id = :r AND lect_version = 1"
+            ),
+            {"r": registro_id},
+        )
+
+        ultima = None
+        if tram_id is not None:
+            parametros: dict[str, Any] = {"tram": tram_id}
+            if lote_id is None:
+                consulta_ultima = (
+                    "SELECT max(l.lect_t_observacion) FROM sigat.lectura_trampa l"
+                    " WHERE l.tram_id = :tram AND NOT l.lect_anulada"
+                )
+            else:
+                parametros["lote"] = lote_id
+                consulta_ultima = (
+                    "SELECT max(l.lect_t_observacion) FROM sigat.lectura_trampa l"
+                    " WHERE l.tram_id = :tram AND NOT l.lect_anulada"
+                    "   AND EXISTS (SELECT 1 FROM sigat.ubicacion_trampa u"
+                    "                WHERE u.ubic_id = l.ubic_id AND u.lote_id = :lote)"
+                )
+            ultima = await self._con.scalar(text(consulta_ultima), parametros)
+
+        solapamiento = False
+        if tram_id is not None:
+            solapamiento = bool(
+                await self._con.scalar(
+                    text(
+                        """
+SELECT EXISTS (
+    SELECT 1
+      FROM sigat.v_lectura_vigente l
+     WHERE l.tram_id = :tram
+       AND l.lect_registro_id <> :r
+       AND (l.lect_t_observacion AT TIME ZONE 'UTC')::date
+           = (:t_obs AT TIME ZONE 'UTC')::date
+)
+"""
+                    ),
+                    {"tram": tram_id, "r": registro_id, "t_obs": t_observacion},
+                )
+            )
+
+        return EstadoPrevio(
+            version_vigente=int(vigente["lect_version"]),
+            t_observacion_original=original,
+            ultima_t_observacion_serie=ultima,
+            hay_solapamiento=solapamiento,
+        )
 
     async def insertar_version(self, entidad: str, fila: dict[str, Any]) -> UUID:
-        """INSERT en la tabla de la entidad. La BD valida versión n+1 y t_observacion inmutable
-        (fn_registro_version_valida) y fija t_sincronizacion."""
-        raise NoImplementado("Insertar versión")
+        if entidad != "lectura_trampa":
+            raise ValueError(f"Entidad versionada no soportada por el sprint: {entidad}")
+        columnas = [c for c in fila if c in _COLUMNAS_LECTURA | _COLUMNAS_LECTURA_SERVIDOR]
+        if not columnas:
+            raise ValueError("La lectura no trae columnas que se puedan insertar")
+        lista = ", ".join(columnas)
+        valores = ", ".join(f":{c}" for c in columnas)
+        lect_id = await self._con.scalar(
+            text(
+                f"INSERT INTO sigat.lectura_trampa ({lista}) VALUES ({valores}) RETURNING lect_id",  # noqa: S608
+            ),
+            {c: fila[c] for c in columnas},
+        )
+        return UUID(str(lect_id))
 
     async def insertar_visita(self, fila: dict[str, Any], lote_ids: list[int]) -> None:
-        """visita + visita_lote (todas del mismo predio: FK compuesta)."""
-        raise NoImplementado("Insertar visita")
+        await self._con.execute(
+            text(
+                """
+INSERT INTO sigat.visita (
+    visi_id, disp_id, oper_id, usua_id, pred_id, ruta_id,
+    visi_t_inicio_obs, visi_t_fin_obs, visi_t_captura, visi_deriva_reloj_seg
+) VALUES (
+    :visi_id, :disp_id, :oper_id, :usua_id, :pred_id, :ruta_id,
+    :visi_t_inicio_obs, :visi_t_fin_obs, :visi_t_captura, :visi_deriva_reloj_seg
+)
+"""
+            ),
+            fila,
+        )
+        for lote_id in lote_ids:
+            await self._con.execute(
+                text(
+                    "INSERT INTO sigat.visita_lote (visi_id, lote_id, pred_id)"
+                    " VALUES (:visi_id, :lote_id, :pred_id)"
+                ),
+                {"visi_id": fila["visi_id"], "lote_id": lote_id, "pred_id": fila["pred_id"]},
+            )
 
     async def actualizar_revision_visita(
         self, visi_id: UUID, estado: str, motivo: str | None, usua_id: int, en: datetime
@@ -249,6 +386,61 @@ UPDATE sigat.visita
             ),
             {"visi": visi_id, "estado": estado, "motivo": motivo, "usua": usua_id, "en": en},
         )
+
+    async def lectura_vigente(self, registro_id: UUID) -> dict[str, Any] | None:
+        fila = (
+            (
+                await self._con.execute(
+                    text(
+                        """
+SELECT *
+  FROM sigat.lectura_trampa
+ WHERE lect_registro_id = :r
+ ORDER BY lect_version DESC
+ LIMIT 1
+"""
+                    ),
+                    {"r": registro_id},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if fila is None:
+            return None
+        return {c: fila[c] for c in _COLUMNAS_LECTURA if c in fila}
+
+    async def visita_existe(self, visi_id: UUID) -> bool:
+        return bool(
+            await self._con.scalar(text("SELECT 1 FROM sigat.visita WHERE visi_id = :v"), {"v": visi_id})
+        )
+
+    async def visita_lotes(self, visi_id: UUID) -> list[int]:
+        filas = await self._con.execute(
+            text("SELECT lote_id FROM sigat.visita_lote WHERE visi_id = :v"), {"v": visi_id}
+        )
+        return [int(f[0]) for f in filas]
+
+    async def periodo_de(self, lote_id: int, fecha: date) -> dict[str, Any] | None:
+        fila = (
+            (
+                await self._con.execute(
+                    text(
+                        """
+SELECT peri_id, peri_estado
+  FROM sigat.periodo_trampeo
+ WHERE lote_id = :lote AND peri_inicio <= :fecha AND peri_fin >= :fecha
+ ORDER BY peri_fin DESC
+ LIMIT 1
+"""
+                    ),
+                    {"lote": lote_id, "fecha": fecha},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return dict(fila) if fila else None
 
     # ------------------------------------------------------------------ visitas
     async def visitas(
@@ -474,7 +666,7 @@ LIMIT :lim
         )
 
     async def autorreportes(self, entidad: str, usua_id: int, lote_id: int | None, cursor: str | None) -> Any:
-        raise NoImplementado("Autorreportes")
+        raise NotImplementedError("Autorreportes")
 
     async def contar_por_revisar(self, usua_id: int) -> int:
         sql = """

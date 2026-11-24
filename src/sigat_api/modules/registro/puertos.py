@@ -1,5 +1,3 @@
-"""Lo que REGISTRO necesita de otros módulos."""
-
 from datetime import datetime
 from typing import Protocol
 
@@ -8,13 +6,15 @@ from sigat_api.compartido.tipos import Actor
 
 
 class PuertoConfiguracion(Protocol):
-    """Implementa: configuración (ubicacion_trampa, lote)."""
-
     async def pertenencia_trampa(self, tram_id: int, instante: datetime) -> PertenenciaTrampa | None:
         """Ubicación vigente de la trampa en ``instante`` (no hoy): la asignación que regía al observar."""
         ...
 
     async def lote_activo_en(self, lote_id: int, instante: datetime) -> bool: ...
+
+    async def lote_visible(self, usua_id: int, lote_id: int) -> bool: ...
+
+    async def lote_predio(self, lote_id: int) -> int | None: ...
 
 
 class PuertoOperaciones(Protocol):

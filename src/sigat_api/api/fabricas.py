@@ -13,7 +13,6 @@ from fastapi import Depends
 
 from sigat_api.api.dependencias import ConexionDep, ConexionPublicaDep, configuracion
 from sigat_api.compartido.contratos import PertenenciaTrampa
-from sigat_api.compartido.errores import NoImplementado
 from sigat_api.config import Configuracion
 from sigat_api.infra.almacenamiento.objetos import AlmacenS3
 from sigat_api.infra.cola.cola import ColaProcrastinate
@@ -146,18 +145,31 @@ def servicio_paquete(con: ConexionDep) -> ServicioPaqueteCampo:
 
 # ---------------------------------------------------------------- registro, sincronización, planificación
 class _AdaptadorConfiguracionParaRegistro:
-    """Satisface ``registro.puertos.PuertoConfiguracion`` con el repositorio de configuración."""
-
     def __init__(self, repo: RepositorioConfiguracion) -> None:
         self._repo = repo
 
     async def pertenencia_trampa(self, tram_id: int, instante: datetime) -> PertenenciaTrampa | None:
-        """Ubicación de la trampa vigente en ``instante`` (ubicacion_trampa [ubic_fecha, ubic_fecha_fin))."""
-        raise NoImplementado("Pertenencia trampa–lote a una fecha")
+        fila = await self._repo.pertenencia_trampa(tram_id, instante)
+        if fila is None:
+            return None
+        return PertenenciaTrampa(
+            tram_id=tram_id,
+            ubic_id=int(fila["ubic_id"]),
+            lote_id=int(fila["lote_id"]) if fila.get("lote_id") is not None else None,
+            pred_id=int(fila["pred_id"]),
+            lote_activo=await self._repo.lote_activo_en(int(fila["lote_id"]), instante)
+            if fila.get("lote_id") is not None
+            else False,
+        )
 
     async def lote_activo_en(self, lote_id: int, instante: datetime) -> bool:
-        """lote_fecha_registro <= fecha < lote_fecha_baja (o sin baja)."""
-        raise NoImplementado("Lote activo a una fecha")
+        return await self._repo.lote_activo_en(lote_id, instante)
+
+    async def lote_visible(self, usua_id: int, lote_id: int) -> bool:
+        return await self._repo.lote_visible(usua_id, lote_id)
+
+    async def lote_predio(self, lote_id: int) -> int | None:
+        return await self._repo.lote_predio(lote_id)
 
 
 def servicio_planificacion(con: ConexionDep) -> ServicioPlanificacion:
@@ -169,7 +181,13 @@ def servicio_registro(con: ConexionDep) -> ServicioRegistro:
     configuracion_registro = _AdaptadorConfiguracionParaRegistro(RepositorioConfiguracion(con))
     validador = ValidadorInvariantes(configuracion_registro, repo)
     operaciones = RegistradorOperacionesEnLinea(RepositorioSincronizacion(con))
-    return ServicioRegistro(repo, validador, operaciones=operaciones, reloj=_reloj())
+    return ServicioRegistro(
+        repo,
+        validador,
+        operaciones=operaciones,
+        configuracion=configuracion_registro,
+        reloj=_reloj(),
+    )
 
 
 def servicio_sincronizacion(
@@ -182,7 +200,6 @@ def servicio_sincronizacion(
         RepositorioSincronizacion(con),
         registro=registro,
         planificacion=planificacion,
-        cola=_cola(),
         reloj=_reloj(),
         cfg=cfg,
     )

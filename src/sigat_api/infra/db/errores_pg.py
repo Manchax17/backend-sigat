@@ -71,6 +71,41 @@ _RESTRICCIONES: dict[str, tuple[type[ErrorDominio], str, str]] = {
         "La nueva ubicación debe empezar después de la ubicación vigente.",
     ),
     "trampa_tram_tecnico_registro_id_fkey": (ReglaNegocio, "TECNICO_INVALIDO", "El técnico no existe."),
+    "planificacion_actividad_no_vacia": (
+        ReglaNegocio,
+        "ACTIVIDAD_INVALIDA",
+        "Describa la actividad de la planificación.",
+    ),
+    "planificacion_fechas_validas": (
+        ReglaNegocio,
+        "FECHAS_INVALIDAS",
+        "La fecha de finalización no puede ser anterior a la de inicio.",
+    ),
+    "planificacion_horario_completo": (
+        ReglaNegocio,
+        "HORARIO_INCOMPLETO",
+        "Indique la hora de inicio y la de fin, o ninguna.",
+    ),
+    "planificacion_horario_valido": (
+        ReglaNegocio,
+        "HORARIO_INVALIDO",
+        "La hora de fin debe ser posterior a la de inicio.",
+    ),
+    "planificacion_distintas_personas": (
+        ReglaNegocio,
+        "DESTINATARIO_INVALIDO",
+        "No puede dirigirse una planificación a sí mismo.",
+    ),
+    "planificacion_usua_id_destinatario_fkey": (
+        ReglaNegocio,
+        "DESTINATARIO_INVALIDO",
+        "El destinatario no existe.",
+    ),
+    "planificacion_arch_id_documento_plan_documento_clase_fkey": (
+        ReglaNegocio,
+        "DOCUMENTO_INVALIDO",
+        "El documento no existe o no es un documento de instrucciones.",
+    ),
     "centro_acopio_cent_descripcion_key": (
         Conflicto,
         "DUPLICADO",

@@ -5,12 +5,9 @@ import json
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection
-
-from sigat_api.compartido.errores import NoImplementado
 
 # Las vistas de la aplicación (``v_lote_app``, ``v_trampa_app``) traen ya los nombres de campo
 # que el móvil lee. Lo que no traen y el esquema exige se resuelve con estos joins:
@@ -47,19 +44,240 @@ class RepositorioConfiguracion:
         self._con = con
 
     # predios
+    async def predio_visible(self, usua_id: int, pred_id: int) -> bool:
+        """Determina si un usuario tiene acceso a un predio según su rol (RNF-015, RF-002)."""
+        sql = """
+        SELECT EXISTS (
+            SELECT 1 FROM sigat.usuario u
+            JOIN sigat.rol r ON r.rol_id = u.rol_id
+            WHERE u.usua_id = :u AND r.rol_codigo = 'ADMINISTRADOR'
+            UNION ALL
+            SELECT 1 FROM sigat.v_acceso_predio WHERE usua_id = :u AND pred_id = :pred_id
+            UNION ALL
+            SELECT 1 FROM sigat.fn_lotes_visibles(:u) lv
+            JOIN sigat.lote l ON l.lote_id = lv.lote_id
+            WHERE l.pred_id = :pred_id
+        )
+        """
+        return bool(await self._con.scalar(text(sql), {"u": usua_id, "pred_id": pred_id}))
+
     async def predios_visibles(self, usua_id: int) -> list[dict[str, Any]]:
-        raise NoImplementado("Predios visibles")
+        sql = """
+        SELECT p.pred_id,
+               p.pred_codigo,
+               p.pred_nombre,
+               p.muni_id,
+               m.muni_descripcion AS municipio,
+               d.depa_descripcion AS departamento,
+               p.pred_area,
+               pe.pers_nombre || ' ' || pe.pers_apellido AS productor,
+               p.pred_zona_horaria,
+               (SELECT count(*)::int FROM sigat.lote l WHERE l.pred_id = p.pred_id AND l.lote_fecha_baja IS NULL) AS total_lotes,
+               (p.pred_geom IS NOT NULL) AS tiene_geometria,
+               (SELECT tec_pe.pers_nombre || ' ' || tec_pe.pers_apellido
+                  FROM sigat.tecnico t
+                  JOIN sigat.persona tec_pe ON tec_pe.pers_cc = t.pers_cc
+                 WHERE t.tecn_id = p.pred_tecnico_registro_id) AS responsable_tecnico
+          FROM sigat.predio p
+          JOIN sigat.municipio m ON m.muni_id = p.muni_id
+          JOIN sigat.departamento d ON d.depa_id = m.depa_id
+          JOIN sigat.persona pe ON pe.pers_cc = p.pers_cc
+         WHERE (
+            EXISTS (SELECT 1 FROM sigat.usuario u JOIN sigat.rol r ON r.rol_id = u.rol_id WHERE u.usua_id = :u AND r.rol_codigo = 'ADMINISTRADOR')
+            OR p.pred_id IN (SELECT pred_id FROM sigat.v_acceso_predio WHERE usua_id = :u)
+            OR p.pred_id IN (SELECT l.pred_id FROM sigat.fn_lotes_visibles(:u) lv JOIN sigat.lote l ON l.lote_id = lv.lote_id)
+         )
+         ORDER BY p.pred_nombre
+        """
+        filas = await self._con.execute(text(sql), {"u": usua_id})
+        return [dict(f) for f in filas.mappings()]
 
     async def predio(self, pred_id: int) -> dict[str, Any] | None:
-        raise NoImplementado("Predio")
+        sql = """
+        SELECT p.pred_id,
+               p.pred_codigo,
+               p.pred_nombre,
+               p.muni_id,
+               m.muni_descripcion AS municipio,
+               d.depa_descripcion AS departamento,
+               p.pred_area,
+               pe.pers_nombre || ' ' || pe.pers_apellido AS productor,
+               p.pred_zona_horaria,
+               (SELECT count(*)::int FROM sigat.lote l WHERE l.pred_id = p.pred_id AND l.lote_fecha_baja IS NULL) AS total_lotes,
+               (p.pred_geom IS NOT NULL) AS tiene_geometria,
+               (SELECT tec_pe.pers_nombre || ' ' || tec_pe.pers_apellido
+                  FROM sigat.tecnico t
+                  JOIN sigat.persona tec_pe ON tec_pe.pers_cc = t.pers_cc
+                 WHERE t.tecn_id = p.pred_tecnico_registro_id) AS responsable_tecnico
+          FROM sigat.predio p
+          JOIN sigat.municipio m ON m.muni_id = p.muni_id
+          JOIN sigat.departamento d ON d.depa_id = m.depa_id
+          JOIN sigat.persona pe ON pe.pers_cc = p.pers_cc
+         WHERE p.pred_id = :pred_id
+        """
+        fila = (await self._con.execute(text(sql), {"pred_id": pred_id})).mappings().first()
+        return dict(fila) if fila else None
 
     async def actualizar_predio(self, pred_id: int, cambios: dict[str, Any]) -> None:
-        """Fija pred_fecha_actualizacion y pred_tecnico_actualizacion_id según la BD."""
-        raise NoImplementado("Actualizar predio")
+        """Fija pred_fecha_actualizacion según la BD."""
+        if not cambios:
+            return
+        permitidas = {
+            "pred_nombre",
+            "pred_codigo",
+            "muni_id",
+            "pred_area",
+            "pred_zona_horaria",
+            "pred_fecha_actualizacion",
+        }
+        no_permitidas = set(cambios) - permitidas
+        if no_permitidas:
+            raise ValueError(f"Columnas no editables en predio: {sorted(no_permitidas)}")
+        asignaciones = ", ".join(f"{k} = :{k}" for k in cambios)
+        sql = f"UPDATE sigat.predio SET {asignaciones} WHERE pred_id = :pred_id"  # noqa: S608
+        await self._con.execute(text(sql), {**cambios, "pred_id": pred_id})
+
+    async def actualizar_geometria_predio(self, pred_id: int, geojson: str) -> None:
+        """Actualiza ``pred_geom`` convirtiendo Polygon/MultiPolygon GeoJSON a MultiPolygon SRID 4326."""
+        sql = """
+        UPDATE sigat.predio
+           SET pred_geom = ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)),
+               pred_fecha_actualizacion = CURRENT_DATE
+         WHERE pred_id = :pred_id
+        """
+        await self._con.execute(text(sql), {"pred_id": pred_id, "geojson": geojson})
 
     async def mapa_predio(self, pred_id: int, instante: datetime) -> dict[str, Any]:
         """ST_AsGeoJSON de predio, lote_geometria vigente en ``instante``, reticula_celda y ubicacion_trampa."""
-        raise NoImplementado("Mapa del predio")
+        # 1. Geometría del predio
+        sql_pred = """
+        SELECT pred_id, pred_nombre, pred_codigo,
+               CASE WHEN pred_geom IS NULL THEN NULL ELSE ST_AsGeoJSON(pred_geom) END AS geom_json
+          FROM sigat.predio
+         WHERE pred_id = :pred_id
+        """
+        fila_pred = (await self._con.execute(text(sql_pred), {"pred_id": pred_id})).mappings().first()
+        pred_geom = json.loads(fila_pred["geom_json"]) if fila_pred and fila_pred["geom_json"] else None
+        pred_feature = {
+            "type": "Feature",
+            "id": pred_id,
+            "geometry": pred_geom,
+            "properties": {
+                "pred_id": pred_id,
+                "pred_nombre": fila_pred["pred_nombre"] if fila_pred else "",
+                "pred_codigo": fila_pred["pred_codigo"] if fila_pred else None,
+            },
+        }
+
+        # 2. Geometría de los lotes
+        sql_lotes = """
+        SELECT l.lote_id, l.lote_codigo, l.lote_descripcion, l.lote_area,
+               CASE WHEN g.lotg_geom IS NULL THEN NULL ELSE ST_AsGeoJSON(g.lotg_geom) END AS geom_json
+          FROM sigat.lote l
+          LEFT JOIN LATERAL (
+              SELECT lotg_geom
+                FROM sigat.lote_geometria
+               WHERE lote_id = l.lote_id
+                 AND lotg_vigente_desde <= :instante
+                 AND (lotg_vigente_hasta IS NULL OR lotg_vigente_hasta > :instante)
+               ORDER BY lotg_version DESC
+               LIMIT 1
+          ) g ON true
+         WHERE l.pred_id = :pred_id AND l.lote_fecha_baja IS NULL
+         ORDER BY l.lote_codigo
+        """
+        filas_lotes = await self._con.execute(text(sql_lotes), {"pred_id": pred_id, "instante": instante})
+        lotes_features: list[dict[str, Any]] = []
+        for fl in filas_lotes.mappings():
+            lg = json.loads(fl["geom_json"]) if fl["geom_json"] else None
+            lotes_features.append(
+                {
+                    "type": "Feature",
+                    "id": fl["lote_id"],
+                    "geometry": lg,
+                    "properties": {
+                        "lote_id": fl["lote_id"],
+                        "lote_codigo": fl["lote_codigo"],
+                        "lote_descripcion": fl["lote_descripcion"],
+                        "lote_area": float(fl["lote_area"]) if fl["lote_area"] is not None else None,
+                    },
+                }
+            )
+
+        # 3. Celdas de retícula
+        sql_celdas = """
+        SELECT rc.retc_id, rc.reti_id, rc.retc_codigo,
+               ST_AsGeoJSON(rc.retc_geom) AS geom_json
+          FROM sigat.reticula_celda rc
+          JOIN sigat.reticula r ON r.reti_id = rc.reti_id
+         WHERE r.pred_id = :pred_id
+         ORDER BY rc.retc_codigo
+        """
+        filas_celdas = await self._con.execute(text(sql_celdas), {"pred_id": pred_id})
+        celdas_features: list[dict[str, Any]] = []
+        for fc in filas_celdas.mappings():
+            cg = json.loads(fc["geom_json"]) if fc["geom_json"] else None
+            celdas_features.append(
+                {
+                    "type": "Feature",
+                    "id": fc["retc_id"],
+                    "geometry": cg,
+                    "properties": {
+                        "retc_id": fc["retc_id"],
+                        "reti_id": fc["reti_id"],
+                        "retc_codigo": fc["retc_codigo"],
+                    },
+                }
+            )
+
+        # 4. Ubicación de trampas vigentes
+        sql_trampas = """
+        SELECT t.tram_id, t.tram_codigo, u.ubic_id, u.lote_id,
+               ST_AsGeoJSON(u.ubic_geom) AS geom_json
+          FROM sigat.ubicacion_trampa u
+          JOIN sigat.trampa t ON t.tram_id = u.tram_id
+         WHERE u.pred_id = :pred_id AND u.ubic_fecha_fin IS NULL
+         ORDER BY t.tram_codigo
+        """
+        filas_trampas = await self._con.execute(text(sql_trampas), {"pred_id": pred_id})
+        trampas_features: list[dict[str, Any]] = []
+        for ft in filas_trampas.mappings():
+            tg = json.loads(ft["geom_json"]) if ft["geom_json"] else None
+            trampas_features.append(
+                {
+                    "type": "Feature",
+                    "id": ft["tram_id"],
+                    "geometry": tg,
+                    "properties": {
+                        "tram_id": ft["tram_id"],
+                        "tram_codigo": ft["tram_codigo"],
+                        "lote_id": ft["lote_id"],
+                        "ubic_id": ft["ubic_id"],
+                    },
+                }
+            )
+
+        return {
+            "predio": pred_feature,
+            "lotes": {"type": "FeatureCollection", "features": lotes_features},
+            "celdas": {"type": "FeatureCollection", "features": celdas_features},
+            "trampas": {"type": "FeatureCollection", "features": trampas_features},
+        }
+
+    async def limites_predio(self, pred_id: int) -> list[float] | None:
+        """Bounding box [minx, miny, maxx, maxy] EPSG:4326 del predio."""
+        sql = """
+        SELECT ST_XMin(pred_geom) AS minx,
+               ST_YMin(pred_geom) AS miny,
+               ST_XMax(pred_geom) AS maxx,
+               ST_YMax(pred_geom) AS maxy
+          FROM sigat.predio
+         WHERE pred_id = :pred_id AND pred_geom IS NOT NULL
+        """
+        fila = (await self._con.execute(text(sql), {"pred_id": pred_id})).mappings().first()
+        if not fila or fila["minx"] is None:
+            return None
+        return [float(fila["minx"]), float(fila["miny"]), float(fila["maxx"]), float(fila["maxy"])]
 
     # lotes
     async def lotes_visibles(self, usua_id: int, pred_id: int | None) -> list[dict[str, Any]]:
@@ -138,8 +356,91 @@ SELECT v.*,
             )
         )
 
+    async def lote_predio(self, lote_id: int) -> int | None:
+        valor = await self._con.scalar(
+            text("SELECT pred_id FROM sigat.lote WHERE lote_id = :lote"), {"lote": lote_id}
+        )
+        return int(valor) if valor is not None else None
+
+    async def pertenencia_trampa(self, tram_id: int, instante: datetime) -> dict[str, Any] | None:
+        fila = (
+            (
+                await self._con.execute(
+                    text(
+                        """
+SELECT u.ubic_id,
+       u.lote_id,
+       u.pred_id,
+       t.tram_codigo,
+       l.lote_fecha_registro,
+       l.lote_fecha_baja
+  FROM sigat.ubicacion_trampa u
+  JOIN sigat.trampa t ON t.tram_id = u.tram_id
+  JOIN sigat.lote l ON l.lote_id = u.lote_id
+  JOIN sigat.predio p ON p.pred_id = u.pred_id
+ WHERE u.tram_id = :tram
+   AND u.ubic_fecha <= (CAST(:instante AS timestamptz) AT TIME ZONE p.pred_zona_horaria)::date
+   AND (u.ubic_fecha_fin IS NULL
+        OR u.ubic_fecha_fin > (CAST(:instante AS timestamptz) AT TIME ZONE p.pred_zona_horaria)::date)
+ ORDER BY u.ubic_fecha DESC, u.ubic_id DESC
+ LIMIT 1
+"""
+                    ),
+                    {"tram": tram_id, "instante": instante},
+                )
+            )
+            .mappings()
+            .first()
+        )
+        return dict(fila) if fila else None
+
+    async def lote_activo_en(self, lote_id: int, instante: date | datetime) -> bool:
+        return bool(
+            await self._con.scalar(
+                text(
+                    """
+SELECT coalesce(
+         l.lote_fecha_registro <= (CAST(:instante AS timestamptz) AT TIME ZONE p.pred_zona_horaria)::date
+         AND (l.lote_fecha_baja IS NULL
+              OR l.lote_fecha_baja > (CAST(:instante AS timestamptz) AT TIME ZONE p.pred_zona_horaria)::date),
+         false)
+  FROM sigat.lote l
+  JOIN sigat.predio p ON p.pred_id = l.pred_id
+ WHERE l.lote_id = :lote
+"""
+                ),
+                {"lote": lote_id, "instante": instante},
+            )
+        )
+
     async def insertar_lote(self, pred_id: int, datos: dict[str, Any]) -> int:
-        raise NoImplementado("Alta de lote")
+        sql = """
+        INSERT INTO sigat.lote (
+            pred_id, lote_codigo, lote_descripcion, lote_area, espc_id, vari_id,
+            lote_fecha_plantacion, lote_fecha_registro, lote_tecnico_registro_id
+        )
+        SELECT :pred_id, :lote_codigo, :lote_descripcion, :lote_area, :espc_id, :vari_id,
+               :lote_fecha_plantacion, :lote_fecha_registro, p.pred_tecnico_registro_id
+          FROM sigat.predio p
+         WHERE p.pred_id = :pred_id
+        RETURNING lote_id
+        """
+        lote_id = await self._con.scalar(
+            text(sql),
+            {
+                "pred_id": pred_id,
+                "lote_codigo": datos.get("lote_codigo"),
+                "lote_descripcion": datos["lote_descripcion"],
+                "lote_area": datos["lote_area"],
+                "espc_id": datos.get("espc_id"),
+                "vari_id": datos.get("vari_id"),
+                "lote_fecha_plantacion": datos.get("lote_fecha_plantacion"),
+                "lote_fecha_registro": datos["lote_fecha_registro"],
+            },
+        )
+        if lote_id is None:
+            raise RuntimeError("No se pudo insertar el lote")
+        return int(lote_id)
 
     async def actualizar_lote(self, lote_id: int, cambios: dict[str, Any]) -> None:
         """UPDATE con lista blanca de columnas. ``sigat.usuario_actual`` ya lo fija ``sesion.transaccion()``."""
@@ -153,12 +454,92 @@ SELECT v.*,
         sql = f"UPDATE sigat.lote SET {asignaciones} WHERE lote_id = :lote_id"  # noqa: S608
         await self._con.execute(text(sql), {**cambios, "lote_id": lote_id})
 
+    async def geometrias_lote(self, lote_id: int) -> list[dict[str, Any]]:
+        sql = """
+        SELECT lotg_id,
+               lotg_version,
+               ST_AsGeoJSON(lotg_geom) AS geometria,
+               lotg_area_m2,
+               lotg_vigente_desde AS vigente_desde,
+               lotg_vigente_hasta AS vigente_hasta,
+               lotg_fuente AS fuente,
+               lotg_motivo AS motivo,
+               lotg_registrado_en AS registrado_en
+          FROM sigat.lote_geometria
+         WHERE lote_id = :lote_id
+         ORDER BY lotg_version DESC
+        """
+        filas = await self._con.execute(text(sql), {"lote_id": lote_id})
+        resultado: list[dict[str, Any]] = []
+        for f in filas.mappings():
+            d = dict(f)
+            if isinstance(d.get("geometria"), str):
+                d["geometria"] = json.loads(d["geometria"])
+            resultado.append(d)
+        return resultado
+
     async def nueva_version_geometria(
-        self, lote_id: int, geojson: str, desde: datetime, fuente: str, motivo: str
-    ) -> int:
+        self,
+        lote_id: int,
+        geojson: str,
+        desde: datetime,
+        fuente: str,
+        motivo: str,
+        registrado_por: int | None = None,
+    ) -> dict[str, Any]:
         """En una transacción: cierra la vigente (lotg_vigente_hasta = desde) e inserta la nueva.
         La BD valida geometría (fn_lote_geometria_valida) y no solape (EXCLUDE)."""
-        raise NoImplementado("Nueva versión de geometría")
+        async with self._con.begin_nested():
+            await self._con.execute(
+                text(
+                    """
+                    UPDATE sigat.lote_geometria
+                       SET lotg_vigente_hasta = :desde
+                     WHERE lote_id = :lote_id AND lotg_vigente_hasta IS NULL
+                    """
+                ),
+                {"lote_id": lote_id, "desde": desde},
+            )
+            fila = (
+                (
+                    await self._con.execute(
+                        text(
+                            """
+                            INSERT INTO sigat.lote_geometria (
+                                lote_id, lotg_version, lotg_geom, lotg_vigente_desde,
+                                lotg_fuente, lotg_motivo, lotg_registrado_por
+                            ) VALUES (
+                                :lote_id,
+                                COALESCE((SELECT max(lotg_version) FROM sigat.lote_geometria WHERE lote_id = :lote_id), 0) + 1,
+                                ST_Multi(ST_SetSRID(ST_GeomFromGeoJSON(:geojson), 4326)),
+                                :desde,
+                                :fuente,
+                                :motivo,
+                                :registrado_por
+                            )
+                            RETURNING lotg_id, lotg_version, ST_AsGeoJSON(lotg_geom) AS geometria,
+                                      lotg_area_m2, lotg_vigente_desde AS vigente_desde,
+                                      lotg_vigente_hasta AS vigente_hasta, lotg_fuente AS fuente,
+                                      lotg_motivo AS motivo, lotg_registrado_en AS registrado_en
+                            """
+                        ),
+                        {
+                            "lote_id": lote_id,
+                            "geojson": geojson,
+                            "desde": desde,
+                            "fuente": fuente,
+                            "motivo": motivo,
+                            "registrado_por": registrado_por,
+                        },
+                    )
+                )
+                .mappings()
+                .one()
+            )
+        datos = dict(fila)
+        if isinstance(datos.get("geometria"), str):
+            datos["geometria"] = json.loads(datos["geometria"])
+        return datos
 
     # trampas
     async def trampas_visibles(
@@ -285,24 +666,6 @@ SELECT t.tram_id,
             text("SELECT pred_id FROM sigat.lote WHERE lote_id = :lote_id"), {"lote_id": lote_id}
         )
         return int(valor) if valor is not None else None
-
-    async def lote_activo_en(self, lote_id: int, fecha: date) -> bool:
-        """El lote está activo entre ``lote_fecha_registro`` (inclusive) y ``lote_fecha_baja``
-        (primer día inactivo, exclusivo), según la definición de la tabla ``lote``."""
-        return bool(
-            await self._con.scalar(
-                text(
-                    """
-SELECT EXISTS (
-       SELECT 1 FROM sigat.lote
-        WHERE lote_id = :lote_id
-          AND lote_fecha_registro <= :fecha
-          AND (lote_fecha_baja IS NULL OR lote_fecha_baja > :fecha))
-"""
-                ),
-                {"lote_id": lote_id, "fecha": fecha},
-            )
-        )
 
     async def distancia_minima_trampas(self, pred_id: int, fecha: date) -> int | None:
         """RN-004: ``prog_distancia_min_trampas_m`` del programa vigente en ``fecha``.
@@ -513,32 +876,388 @@ RETURNING ubic_id
     # programa / retícula / paquete
     async def programa_vigente(self, pred_id: int, fecha: date) -> dict[str, Any] | None:
         """Vigencia [desde, hasta): ``prog_vigente_desde <= fecha AND (hasta IS NULL OR hasta > fecha)``."""
-        raise NoImplementado("Programa vigente")
+        sql = """
+        SELECT pi.prog_id,
+               pi.pred_id,
+               pi.prog_version,
+               pi.prog_vigente_desde AS vigente_desde,
+               pi.prog_vigente_hasta AS vigente_hasta,
+               pi.prog_ciclo_inicio AS ciclo_inicio,
+               pi.prog_ciclo_fin AS ciclo_fin,
+               pi.prog_periodo_lectura_dias AS periodo_lectura_dias,
+               pi.prog_distancia_min_trampas_m AS distancia_min_trampas_m,
+               pi.reti_id,
+               r.reti_resolucion_m AS resolucion_reticula_m,
+               pi.prog_proveedor_imagen AS proveedor_imagen,
+               pi.prog_umbral_exportacion_mtd AS umbral_exportacion_mtd,
+               pi.norm_id,
+               n.norm_codigo,
+               n.norm_titulo,
+               pi.prog_motivo_cambio AS motivo_cambio,
+               pi.prog_creado_en AS creado_en,
+               pe.pers_nombre || ' ' || pe.pers_apellido AS creado_por
+          FROM sigat.programa_inspeccion pi
+          LEFT JOIN sigat.reticula r ON r.reti_id = pi.reti_id
+          LEFT JOIN sigat.norma n ON n.norm_id = pi.norm_id
+          LEFT JOIN sigat.usuario u ON u.usua_id = pi.prog_creado_por
+          LEFT JOIN sigat.persona pe ON pe.pers_cc = u.pers_cc
+         WHERE pi.pred_id = :pred_id
+           AND pi.prog_vigente_desde <= :fecha
+           AND (pi.prog_vigente_hasta IS NULL OR pi.prog_vigente_hasta > :fecha)
+         ORDER BY pi.prog_version DESC
+         LIMIT 1
+        """
+        fila = (await self._con.execute(text(sql), {"pred_id": pred_id, "fecha": fecha})).mappings().first()
+        if not fila:
+            return None
+        datos = dict(fila)
+        prog_id = datos["prog_id"]
+
+        # Escenarios
+        sql_esc = """
+        SELECT pu.esce_id, et.esce_descripcion AS descripcion, et.esce_orden AS orden,
+               pu.prou_mtd_desde AS mtd_desde, pu.prou_mtd_hasta AS mtd_hasta
+          FROM sigat.programa_umbral pu
+          JOIN sigat.escenario_trampeo et ON et.esce_id = pu.esce_id
+         WHERE pu.prog_id = :prog_id
+         ORDER BY et.esce_orden
+        """
+        filas_esc = await self._con.execute(text(sql_esc), {"prog_id": prog_id})
+        datos["escenarios"] = [dict(fe) for fe in filas_esc.mappings()]
+
+        # Criterios BPA
+        sql_bpa = """
+        SELECT crit_id FROM sigat.programa_criterio_bpa WHERE prog_id = :prog_id ORDER BY crit_id
+        """
+        filas_bpa = await self._con.execute(text(sql_bpa), {"prog_id": prog_id})
+        datos["criterios_bpa"] = [int(f[0]) for f in filas_bpa]
+
+        if datos.get("norm_id") is not None:
+            datos["norma"] = {
+                "norm_id": datos.pop("norm_id"),
+                "norm_codigo": datos.pop("norm_codigo"),
+                "norm_titulo": datos.pop("norm_titulo"),
+            }
+        else:
+            datos["norma"] = None
+            datos.pop("norm_id", None)
+            datos.pop("norm_codigo", None)
+            datos.pop("norm_titulo", None)
+
+        return datos
+
+    async def _completar_programa(self, datos: dict[str, Any]) -> dict[str, Any]:
+        prog_id = datos["prog_id"]
+        sql_esc = """
+        SELECT pu.esce_id, et.esce_descripcion AS descripcion, et.esce_orden AS orden,
+               pu.prou_mtd_desde AS mtd_desde, pu.prou_mtd_hasta AS mtd_hasta
+          FROM sigat.programa_umbral pu
+          JOIN sigat.escenario_trampeo et ON et.esce_id = pu.esce_id
+         WHERE pu.prog_id = :prog_id
+         ORDER BY et.esce_orden
+        """
+        filas_esc = await self._con.execute(text(sql_esc), {"prog_id": prog_id})
+        datos["escenarios"] = [dict(fe) for fe in filas_esc.mappings()]
+
+        sql_bpa = """
+        SELECT crit_id FROM sigat.programa_criterio_bpa WHERE prog_id = :prog_id ORDER BY crit_id
+        """
+        filas_bpa = await self._con.execute(text(sql_bpa), {"prog_id": prog_id})
+        datos["criterios_bpa"] = [int(f[0]) for f in filas_bpa]
+
+        if datos.get("norm_id") is not None and datos.get("norm_codigo") is not None:
+            datos["norma"] = {
+                "norm_id": datos.pop("norm_id"),
+                "norm_codigo": datos.pop("norm_codigo"),
+                "norm_titulo": datos.pop("norm_titulo"),
+            }
+        else:
+            datos["norma"] = None
+            datos.pop("norm_id", None)
+            datos.pop("norm_codigo", None)
+            datos.pop("norm_titulo", None)
+        return datos
 
     async def versiones_programa(self, pred_id: int) -> list[dict[str, Any]]:
-        raise NoImplementado("Versiones del programa")
+        sql = """
+        SELECT pi.prog_id,
+               pi.pred_id,
+               pi.prog_version,
+               pi.prog_vigente_desde AS vigente_desde,
+               pi.prog_vigente_hasta AS vigente_hasta,
+               pi.prog_ciclo_inicio AS ciclo_inicio,
+               pi.prog_ciclo_fin AS ciclo_fin,
+               pi.prog_periodo_lectura_dias AS periodo_lectura_dias,
+               pi.prog_distancia_min_trampas_m AS distancia_min_trampas_m,
+               pi.reti_id,
+               r.reti_resolucion_m AS resolucion_reticula_m,
+               pi.prog_proveedor_imagen AS proveedor_imagen,
+               pi.prog_umbral_exportacion_mtd AS umbral_exportacion_mtd,
+               pi.norm_id,
+               n.norm_codigo,
+               n.norm_titulo,
+               pi.prog_motivo_cambio AS motivo_cambio,
+               pi.prog_creado_en AS creado_en,
+               pe.pers_nombre || ' ' || pe.pers_apellido AS creado_por
+          FROM sigat.programa_inspeccion pi
+          LEFT JOIN sigat.reticula r ON r.reti_id = pi.reti_id
+          LEFT JOIN sigat.norma n ON n.norm_id = pi.norm_id
+          LEFT JOIN sigat.usuario u ON u.usua_id = pi.prog_creado_por
+          LEFT JOIN sigat.persona pe ON pe.pers_cc = u.pers_cc
+         WHERE pi.pred_id = :pred_id
+         ORDER BY pi.prog_version DESC
+        """
+        filas = (await self._con.execute(text(sql), {"pred_id": pred_id})).mappings().all()
+        return [await self._completar_programa(dict(f)) for f in filas]
 
-    async def nueva_version_programa(self, pred_id: int, datos: dict[str, Any], creado_por: int) -> int:
+    async def nueva_version_programa(
+        self, pred_id: int, datos: dict[str, Any], creado_por: int
+    ) -> dict[str, Any]:
         """Cierra la vigente y crea la siguiente + programa_umbral + programa_criterio_bpa."""
-        raise NoImplementado("Nueva versión del programa")
+        async with self._con.begin_nested():
+            await self._con.execute(
+                text(
+                    """
+                    UPDATE sigat.programa_inspeccion
+                       SET prog_vigente_hasta = :vigente_desde
+                     WHERE pred_id = :pred_id AND prog_vigente_hasta IS NULL
+                    """
+                ),
+                {"pred_id": pred_id, "vigente_desde": datos["vigente_desde"]},
+            )
+            prog_id = await self._con.scalar(
+                text(
+                    """
+                    INSERT INTO sigat.programa_inspeccion (
+                        pred_id, prog_version, prog_vigente_desde, prog_ciclo_inicio, prog_ciclo_fin,
+                        prog_periodo_lectura_dias, prog_distancia_min_trampas_m, reti_id,
+                        prog_proveedor_imagen, prog_umbral_exportacion_mtd, norm_id,
+                        prog_motivo_cambio, prog_creado_por
+                    ) VALUES (
+                        :pred_id,
+                        COALESCE((SELECT max(prog_version) FROM sigat.programa_inspeccion WHERE pred_id = :pred_id), 0) + 1,
+                        :vigente_desde, :ciclo_inicio, :ciclo_fin,
+                        :periodo_lectura_dias, :distancia_min_trampas_m, :reti_id,
+                        :proveedor_imagen, :umbral_exportacion_mtd, :norm_id,
+                        :motivo_cambio, :creado_por
+                    )
+                    RETURNING prog_id
+                    """
+                ),
+                {
+                    "pred_id": pred_id,
+                    "vigente_desde": datos["vigente_desde"],
+                    "ciclo_inicio": datos.get("ciclo_inicio"),
+                    "ciclo_fin": datos.get("ciclo_fin"),
+                    "periodo_lectura_dias": datos["periodo_lectura_dias"],
+                    "distancia_min_trampas_m": datos["distancia_min_trampas_m"],
+                    "reti_id": datos.get("reti_id"),
+                    "proveedor_imagen": datos.get("proveedor_imagen"),
+                    "umbral_exportacion_mtd": datos.get("umbral_exportacion_mtd"),
+                    "norm_id": datos.get("norm_id"),
+                    "motivo_cambio": datos["motivo_cambio"],
+                    "creado_por": creado_por,
+                },
+            )
+            if prog_id is None:
+                raise RuntimeError("No se pudo crear la versión del programa")
+
+            for esc in datos.get("escenarios", []):
+                await self._con.execute(
+                    text(
+                        """
+                        INSERT INTO sigat.programa_umbral (prog_id, esce_id, prou_mtd_desde, prou_mtd_hasta)
+                        VALUES (:prog_id, :esce_id, :mtd_desde, :mtd_hasta)
+                        """
+                    ),
+                    {
+                        "prog_id": int(prog_id),
+                        "esce_id": esc["esce_id"],
+                        "mtd_desde": esc["mtd_desde"],
+                        "mtd_hasta": esc.get("mtd_hasta"),
+                    },
+                )
+
+            for crit_id in datos.get("criterios_bpa", []):
+                await self._con.execute(
+                    text(
+                        """
+                        INSERT INTO sigat.programa_criterio_bpa (prog_id, crit_id)
+                        VALUES (:prog_id, :crit_id)
+                        """
+                    ),
+                    {"prog_id": int(prog_id), "crit_id": int(crit_id)},
+                )
+
+        versiones = await self.versiones_programa(pred_id)
+        for v in versiones:
+            if v["prog_id"] == int(prog_id):
+                return v
+        raise RuntimeError("No se encontró la versión recién creada")
 
     async def reticula(self, pred_id: int) -> dict[str, Any] | None:
-        raise NoImplementado("Retícula")
+        sql = """
+        SELECT reti_id, pred_id, reti_resolucion_m AS resolucion_m,
+               reti_fecha_corte_imagen AS fecha_corte_imagen,
+               reti_creada_en AS creada_en
+          FROM sigat.reticula
+         WHERE pred_id = :pred_id
+         ORDER BY reti_creada_en DESC, reti_id DESC
+         LIMIT 1
+        """
+        fila = (await self._con.execute(text(sql), {"pred_id": pred_id})).mappings().first()
+        if not fila:
+            return None
+        datos = dict(fila)
+        sql_celdas = """
+        SELECT retc_id, reti_id, retc_codigo, ST_AsGeoJSON(retc_geom) AS geom_json
+          FROM sigat.reticula_celda
+         WHERE reti_id = :reti_id
+         ORDER BY retc_codigo
+        """
+        filas_c = await self._con.execute(text(sql_celdas), {"reti_id": datos["reti_id"]})
+        features: list[dict[str, Any]] = []
+        for fc in filas_c.mappings():
+            cg = json.loads(fc["geom_json"]) if fc["geom_json"] else None
+            features.append(
+                {
+                    "type": "Feature",
+                    "id": fc["retc_id"],
+                    "geometry": cg,
+                    "properties": {
+                        "retc_id": fc["retc_id"],
+                        "reti_id": fc["reti_id"],
+                        "retc_codigo": fc["retc_codigo"],
+                    },
+                }
+            )
+        datos["celdas"] = {"type": "FeatureCollection", "features": features}
+        return datos
 
     async def insertar_reticula(
         self, pred_id: int, resolucion_m: int, corte: date | None, celdas: list[dict[str, Any]]
-    ) -> int:
+    ) -> dict[str, Any]:
         """La retícula es inmutable (fn_reticula_inmutable): una nueva resolución = nueva retícula."""
-        raise NoImplementado("Alta de retícula")
+        async with self._con.begin_nested():
+            reti_id = await self._con.scalar(
+                text(
+                    """
+                    INSERT INTO sigat.reticula (pred_id, reti_resolucion_m, reti_fecha_corte_imagen)
+                    VALUES (:pred_id, :resolucion_m, :corte)
+                    RETURNING reti_id
+                    """
+                ),
+                {"pred_id": pred_id, "resolucion_m": resolucion_m, "corte": corte},
+            )
+            if reti_id is None:
+                raise RuntimeError("No se pudo crear la retícula")
+            for idx, celda in enumerate(celdas, start=1):
+                props = celda.get("properties") or {}
+                codigo = str(props.get("retc_codigo") or f"C{idx:03d}")
+                geom_json = json.dumps(celda["geometry"])
+                await self._con.execute(
+                    text(
+                        """
+                        INSERT INTO sigat.reticula_celda (reti_id, retc_codigo, retc_geom)
+                        VALUES (:reti_id, :codigo, ST_SetSRID(ST_GeomFromGeoJSON(:geom_json), 4326))
+                        """
+                    ),
+                    {"reti_id": int(reti_id), "codigo": codigo, "geom_json": geom_json},
+                )
+        ret = await self.reticula(pred_id)
+        if ret is None:
+            raise RuntimeError("No se encontró la retícula creada")
+        return ret
 
     async def paquete_vigente(self, pred_id: int) -> dict[str, Any] | None:
-        raise NoImplementado("Paquete vigente")
+        sql = """
+        SELECT paqu_id, pred_id, paqu_version, prog_id, paqu_hash,
+               paqu_generado_en AS generado_en, paqu_invalidado_en AS invalidado_en,
+               NULL::integer AS tamano_bytes
+          FROM sigat.paquete_campo
+         WHERE pred_id = :pred_id AND paqu_invalidado_en IS NULL
+         ORDER BY paqu_version DESC
+         LIMIT 1
+        """
+        fila = (await self._con.execute(text(sql), {"pred_id": pred_id})).mappings().first()
+        return dict(fila) if fila else None
 
-    async def registrar_paquete(self, pred_id: int, prog_id: int, hash_hex: str) -> UUID:
-        raise NoImplementado("Registrar paquete")
+    async def registrar_paquete(
+        self, pred_id: int, prog_id: int, hash_hex: str, generado_en: datetime
+    ) -> dict[str, Any]:
+        sql = """
+        INSERT INTO sigat.paquete_campo (
+            pred_id, paqu_version, prog_id, paqu_hash, paqu_generado_en
+        ) VALUES (
+            :pred_id,
+            COALESCE((SELECT max(paqu_version) FROM sigat.paquete_campo WHERE pred_id = :pred_id), 0) + 1,
+            :prog_id,
+            :hash_hex,
+            :generado_en
+        )
+        RETURNING paqu_id, pred_id, paqu_version, prog_id, paqu_hash, paqu_generado_en AS generado_en,
+                  paqu_invalidado_en AS invalidado_en, NULL::integer AS tamano_bytes
+        """
+        fila = (
+            (
+                await self._con.execute(
+                    text(sql),
+                    {
+                        "pred_id": pred_id,
+                        "prog_id": prog_id,
+                        "hash_hex": hash_hex,
+                        "generado_en": generado_en,
+                    },
+                )
+            )
+            .mappings()
+            .one()
+        )
+        return dict(fila)
 
     async def invalidar_paquetes(self, pred_id: int, motivo: str) -> None:
-        raise NoImplementado("Invalidar paquetes")
+        sql = """
+        UPDATE sigat.paquete_campo
+           SET paqu_invalidado_en = now(),
+               paqu_motivo_invalidacion = :motivo
+         WHERE pred_id = :pred_id
+           AND paqu_invalidado_en IS NULL
+        """
+        await self._con.execute(text(sql), {"pred_id": pred_id, "motivo": motivo})
+
+    async def catalogos_paquete(self) -> dict[str, list[dict[str, object]]]:
+        """Catálogos básicos que requiere el móvil para operar sin conexión."""
+        catalogos: dict[str, list[dict[str, object]]] = {}
+        tablas = [
+            (
+                "condicion_trampa",
+                "SELECT cond_id, cond_descripcion, cond_activa FROM sigat.condicion_trampa ORDER BY cond_id",
+            ),
+            (
+                "atrayente",
+                "SELECT atra_id, atra_descripcion, atra_vida_util_min_sem, atra_vida_util_max_sem FROM sigat.atrayente ORDER BY atra_id",
+            ),
+            (
+                "especie_mosca",
+                "SELECT espm_id, espm_descripcion, espm_codigo, espm_tipo FROM sigat.especie_mosca ORDER BY espm_id",
+            ),
+            (
+                "tipo_trampa",
+                "SELECT tipt_id, tipt_descripcion, tipt_paridad FROM sigat.tipo_trampa ORDER BY tipt_id",
+            ),
+            (
+                "producto_fitosanitario",
+                "SELECT prof_id, prof_nombre, prof_ingrediente_activo, prof_registro, prof_activo FROM sigat.producto_fitosanitario ORDER BY prof_id",
+            ),
+            (
+                "unidad_medida",
+                "SELECT unid_id, unid_nombre, unid_simbolo, unid_magnitud FROM sigat.unidad_medida ORDER BY unid_id",
+            ),
+        ]
+        for nombre, sql in tablas:
+            filas = await self._con.execute(text(sql))
+            catalogos[nombre] = [dict(f) for f in filas.mappings()]
+        return catalogos
 
     async def contar_lotes_sobre_umbral(self, usua_id: int) -> int:
         """Cuenta lotes visibles del agronomo cuyo MTD supera el umbral fitosanitario."""

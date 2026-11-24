@@ -1,7 +1,7 @@
 """Reglas del módulo configuracion. Cada regla cuenta para la cobertura de RNF-017."""
 
 import os
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -13,12 +13,11 @@ from sigat_api.api.fabricas import servicio_paquete
 from sigat_api.compartido.errores import Conflicto
 from sigat_api.compartido.tipos import Actor, Cliente, RolCodigo
 from sigat_api.config import Configuracion
+from sigat_api.infra.cola.cola import TAREA_GENERAR_PAQUETE, ColaProcrastinate
 from sigat_api.infra.seguridad.tokens import ServicioTokens
 from sigat_api.modules.configuracion import esquemas as e
 from sigat_api.modules.configuracion.dominio import reticula_valida
-from sigat_api.modules.configuracion.servicio import ServicioTrampas
-
-PENDIENTE = pytest.mark.skip(reason="Por implementar")
+from sigat_api.modules.configuracion.servicio import ServicioPrograma, ServicioTrampas
 
 
 class _RepoCodigoExistente:
@@ -66,19 +65,132 @@ async def test_configuracion_01() -> None:
     assert "Duplicidad de código de trampa" in error.value.detalle
 
 
+class _RepoProgramaVersiones:
+    """Simula versiones de programa e histórico de periodos calculados (ADR-05)."""
+
+    def __init__(self) -> None:
+        self.versiones: list[dict[str, Any]] = [
+            {
+                "prog_id": 1,
+                "pred_id": 1,
+                "prog_version": 1,
+                "vigente_desde": date(2026, 1, 1),
+                "vigente_hasta": None,
+                "ciclo_inicio": None,
+                "ciclo_fin": None,
+                "periodo_lectura_dias": 7,
+                "distancia_min_trampas_m": 50,
+                "reti_id": None,
+                "resolucion_reticula_m": None,
+                "proveedor_imagen": None,
+                "umbral_exportacion_mtd": Decimal("0.1000"),
+                "norma": None,
+                "escenarios": [],
+                "criterios_bpa": [],
+                "motivo_cambio": "Inicial",
+                "creado_por": "Admin",
+                "creado_en": datetime(2026, 1, 1, tzinfo=UTC),
+            }
+        ]
+        self.periodos_calculados: list[dict[str, Any]] = [
+            {
+                "peri_id": 100,
+                "prog_id": 1,
+                "umbral_aplicado": Decimal("0.1000"),
+            }
+        ]
+        self.invalidaciones: list[tuple[int, str]] = []
+
+    async def predio_visible(self, usua_id: int, pred_id: int) -> bool:
+        return pred_id == 1
+
+    async def programa_vigente(self, pred_id: int, fecha: date) -> dict[str, Any] | None:
+        for v in reversed(self.versiones):
+            desde = v["vigente_desde"]
+            hasta = v["vigente_hasta"]
+            if v["pred_id"] == pred_id and desde <= fecha and (hasta is None or hasta > fecha):
+                return dict(v)
+        return None
+
+    async def nueva_version_programa(
+        self, pred_id: int, datos: dict[str, Any], creado_por: int
+    ) -> dict[str, Any]:
+        self.versiones[-1]["vigente_hasta"] = datos["vigente_desde"]
+        nueva = {
+            "prog_id": len(self.versiones) + 1,
+            "pred_id": pred_id,
+            "prog_version": len(self.versiones) + 1,
+            "vigente_desde": datos["vigente_desde"],
+            "vigente_hasta": None,
+            "ciclo_inicio": datos.get("ciclo_inicio"),
+            "ciclo_fin": datos.get("ciclo_fin"),
+            "periodo_lectura_dias": datos["periodo_lectura_dias"],
+            "distancia_min_trampas_m": datos["distancia_min_trampas_m"],
+            "reti_id": datos.get("reti_id"),
+            "resolucion_reticula_m": None,
+            "proveedor_imagen": datos.get("proveedor_imagen"),
+            "umbral_exportacion_mtd": datos.get("umbral_exportacion_mtd"),
+            "norma": None,
+            "escenarios": [],
+            "criterios_bpa": list(datos.get("criterios_bpa", [])),
+            "motivo_cambio": datos["motivo_cambio"],
+            "creado_por": f"Usuario {creado_por}",
+            "creado_en": datetime(2026, 6, 1, tzinfo=UTC),
+        }
+        self.versiones.append(nueva)
+        return dict(nueva)
+
+    async def invalidar_paquetes(self, pred_id: int, motivo: str) -> None:
+        self.invalidaciones.append((pred_id, motivo))
+
+
+def _ejecutar(coro: Any) -> Any:
+    try:
+        coro.send(None)
+    except StopIteration as exc:
+        return exc.value
+
+
 @pytest.mark.regla
-@PENDIENTE
 def test_configuracion_02() -> None:
     """nueva versión del programa no altera periodos ya calculados (ADR-05)."""
+    actor = Actor(usua_id=2, rol=RolCodigo.AGRONOMO_SUPERVISOR, disp_id=None, cliente=Cliente.WEB)
+    repo = _RepoProgramaVersiones()
+    cola = ColaProcrastinate()
+    svc = ServicioPrograma(repo, cola)  # type: ignore[arg-type]
+
+    nueva = _ejecutar(
+        svc.nueva_version(
+            actor,
+            1,
+            e.NuevaVersionPrograma(
+                vigente_desde=date(2026, 6, 1),
+                periodo_lectura_dias=10,
+                distancia_min_trampas_m=45,
+                umbral_exportacion_mtd=Decimal("0.0500"),
+                motivo_cambio="Ajuste normativo semestral",
+            ),
+        )
+    )
+
+    assert nueva.prog_version == 2
+    assert nueva.umbral_exportacion_mtd == Decimal("0.0500")
+    # El programa anterior quedó cerrado en la fecha de entrada en vigor del nuevo
+    prog_en_mayo = _ejecutar(svc.vigente(actor, 1, date(2026, 5, 15)))
+    assert prog_en_mayo.prog_version == 1
+    assert prog_en_mayo.umbral_exportacion_mtd == Decimal("0.1000")
+    # Los periodos ya calculados conservan su umbral original (ADR-05)
+    assert repo.periodos_calculados[0]["umbral_aplicado"] == Decimal("0.1000")
+    # Y el paquete de campo del predio fue invalidado y encolado
+    assert len(repo.invalidaciones) == 1
+    assert repo.invalidaciones[0][0] == 1
+    assert len(cola.pendientes) == 1
+    assert cola.pendientes[0].tarea == TAREA_GENERAR_PAQUETE
 
 
 @pytest.mark.regla
 def test_configuracion_03() -> None:
     """retícula menor o igual a la distancia mínima se rechaza (§5.3)."""
-    # §5.3 (Arquitectura §5.3 / RN-004): la celda debe SUPERAR la distancia mínima entre
-    # trampas. El servicio valida la regla con `dominio.reticula_valida` (el alta en
-    # ServicioReticula.crear aún es NoImplementado), así que se prueba aquí la regla misma:
-    # igual o menor que la distancia mínima → rechazada; estrictamente mayor → aceptada.
     assert not reticula_valida(60, 60)  # igual a la distancia mínima -> rechazada
     assert not reticula_valida(40, 60)  # menor que la distancia mínima -> rechazada
     assert reticula_valida(80, 60)  # mayor que la distancia mínima -> aceptada
@@ -136,10 +248,8 @@ async def test_configuracion_05() -> None:
 
 
 class _ServicioPaqueteVigente:
-    """Simula el contrato de ``ServicioPaqueteCampo.contenido`` (aún ``NoImplementado``):
-    devuelve ``None`` cuando ``If-None-Match`` trae el hash del paquete vigente, y la ruta
-    lo traduce en 304. Registra el valor recibido para comprobar que la ruta reenvía la
-    cabecera sin tocarla."""
+    """Simula el contrato de ``ServicioPaqueteCampo.contenido``: devuelve ``None`` cuando
+    ``If-None-Match`` trae el hash del paquete vigente, y la ruta lo traduce en 304."""
 
     def __init__(self, hash_vigente: str) -> None:
         self.hash_vigente = hash_vigente
@@ -161,10 +271,6 @@ def _token_acceso(rol: RolCodigo, usua_id: int = 2) -> str:
 @pytest.mark.regla
 def test_configuracion_06(cliente: TestClient) -> None:
     """paquete de campo responde 304 con If-None-Match vigente (ADR-09)."""
-    # La ruta (api/v1/rutas/predios.py ``paquete_contenido``) sí está implementada: pasa
-    # ``If-None-Match`` al servicio y traduce None (paquete no modificado) en 304. El servicio
-    # que compara el hash con la cabecera aún es NoImplementado, así que aquí se simula su
-    # contrato documentado y se comprueba el comportamiento real de la ruta.
     hash_vigente = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"  # pragma: allowlist secret (SHA-256 de cadena vacía, constante pública)
     servicio = _ServicioPaqueteVigente(hash_vigente)
     cliente.app.dependency_overrides[servicio_paquete] = lambda: servicio

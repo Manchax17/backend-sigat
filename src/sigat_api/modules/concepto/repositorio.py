@@ -90,7 +90,13 @@ class RepositorioConcepto:
         return filas[0] if filas else None
 
     # ------------------------------------------------------------------ existencia y visibilidad
-    async def lote_visible(self, usua_id: int, lote_id: int) -> bool:
+    async def lote_visible(self, usua_id: int | None, lote_id: int) -> bool:
+        if usua_id is None:
+            resultado = await self._con.scalar(
+                text("SELECT EXISTS (SELECT 1 FROM sigat.lote WHERE lote_id = :lote)"),
+                {"lote": lote_id},
+            )
+            return bool(resultado)
         resultado = await self._con.scalar(
             text("SELECT EXISTS (SELECT 1 FROM sigat.fn_lotes_visibles(:u) WHERE lote_id = :lote)"),
             {"u": usua_id, "lote": lote_id},
@@ -107,12 +113,12 @@ class RepositorioConcepto:
         return bool(resultado)
 
     # ------------------------------------------------------------------ consultas
-    async def resumen(self, usua_id: int, lote_id: int, zona: str) -> dict[str, Any] | None:
+    async def resumen(self, usua_id: int | None, lote_id: int, zona: str) -> dict[str, Any] | None:
         """fn_lote_resumen_app(:usua) WHERE lote_id = :lote + indicadores complementarios."""
         return await self._fila(_RESUMEN, {"u": usua_id, "lote": lote_id, "zona": zona})
 
     async def serie(
-        self, usua_id: int, lote_id: int, desde: date | None, hasta: date | None
+        self, usua_id: int | None, lote_id: int, desde: date | None, hasta: date | None
     ) -> list[dict[str, Any]]:
         """fn_mtd_serie_lote(:usua). Un periodo entra si se SOLAPA con [desde, hasta]."""
         return await self._filas(
@@ -198,10 +204,83 @@ SELECT (SELECT fe.feno_descripcion FROM sigat.fenologia fe
         # La CTE siempre devuelve una fila; el respaldo solo satisface al verificador de tipos.
         return fila or {"derivada": None, "declarada": None, "declarada_el": None}
 
-    # ------------------------------------------------------------------ fuera del alcance del issue #9
+    async def datos_reemision(self, peri_id: int, indi_id: int) -> dict[str, Any] | None:
+        """Obtiene el contexto del periodo, índice MTD, fecha de observación del disparador y concepto actual."""
+        sql = """
+        SELECT pt.peri_id,
+               pt.lote_id,
+               pt.peri_fin,
+               pi.norm_id,
+               im.indi_id,
+               im.indi_resultado_contraste AS contraste,
+               COALESCE(
+                   (SELECT (lt.lect_t_observacion AT TIME ZONE pr.pred_zona_horaria)::date
+                      FROM sigat.lectura_trampa lt
+                     WHERE lt.oper_id = im.oper_id_disparador
+                     ORDER BY lt.lect_t_observacion DESC
+                     LIMIT 1),
+                   (SELECT max((lt.lect_t_observacion AT TIME ZONE pr.pred_zona_horaria)::date)
+                      FROM sigat.v_lectura_vigente lt
+                      JOIN sigat.ubicacion_trampa u ON u.ubic_id = lt.ubic_id
+                     WHERE u.lote_id = pt.lote_id
+                       AND (lt.lect_t_observacion AT TIME ZONE pr.pred_zona_horaria)::date
+                           BETWEEN pt.peri_inicio AND pt.peri_fin),
+                   pt.peri_fin
+               ) AS fecha_efecto,
+               (SELECT cv.conc_resultado
+                  FROM sigat.v_concepto_vigente cv
+                 WHERE cv.lote_id = pt.lote_id AND cv.peri_id = pt.peri_id
+                 LIMIT 1) AS resultado_vigente
+          FROM sigat.periodo_trampeo pt
+          JOIN sigat.lote l ON l.lote_id = pt.lote_id
+          JOIN sigat.predio pr ON pr.pred_id = l.pred_id
+          JOIN sigat.programa_inspeccion pi ON pi.prog_id = pt.prog_id
+          JOIN sigat.indice_mtd im ON im.indi_id = :indi_id AND im.peri_id = pt.peri_id
+         WHERE pt.peri_id = :peri_id
+        """
+        fila = (
+            (await self._con.execute(text(sql), {"peri_id": peri_id, "indi_id": indi_id})).mappings().first()
+        )
+        return dict(fila) if fila else None
+
     async def insertar_concepto(self, fila: dict[str, Any]) -> int:
         """INSERT concepto_aptitud versión n+1 (fn_concepto_valida)."""
-        raise NoImplementado("Insertar concepto")
+        sql = """
+        INSERT INTO sigat.concepto_aptitud (
+            lote_id, peri_id, indi_id, conc_version, conc_resultado,
+            conc_fecha_efecto, norm_id, conc_motivo
+        ) VALUES (
+            :lote_id,
+            :peri_id,
+            :indi_id,
+            COALESCE(
+                (SELECT max(conc_version)
+                   FROM sigat.concepto_aptitud
+                  WHERE lote_id = :lote_id AND peri_id = :peri_id),
+                0
+            ) + 1,
+            :conc_resultado,
+            :conc_fecha_efecto,
+            :norm_id,
+            :conc_motivo
+        )
+        RETURNING conc_id
+        """
+        conc_id = await self._con.scalar(
+            text(sql),
+            {
+                "lote_id": fila["lote_id"],
+                "peri_id": fila["peri_id"],
+                "indi_id": fila["indi_id"],
+                "conc_resultado": fila["conc_resultado"],
+                "conc_fecha_efecto": fila["conc_fecha_efecto"],
+                "norm_id": fila.get("norm_id"),
+                "conc_motivo": fila.get("conc_motivo"),
+            },
+        )
+        if conc_id is None:
+            raise RuntimeError("No se pudo insertar el concepto de aptitud")
+        return int(conc_id)
 
     async def cultivo_productor(self, usua_id: int) -> dict[str, Any]:
         raise NoImplementado("Cultivo del productor")

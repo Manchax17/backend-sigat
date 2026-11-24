@@ -1,5 +1,3 @@
-"""Casos de uso del núcleo de registro."""
-
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
@@ -8,11 +6,13 @@ from uuid import UUID
 from sigat_api.compartido.contratos import OperacionCampo, ResultadoAplicacion
 from sigat_api.compartido.errores import Conflicto, NoEncontrado, NoImplementado, ReglaNegocio
 from sigat_api.compartido.esquemas import Pagina
-from sigat_api.compartido.tipos import AccionSync, Actor, EntidadSync, EstadoRevision, RolCodigo
+from sigat_api.compartido.tipos import AccionSync, Actor, ClasificacionOperacion, EntidadSync, EstadoRevision
 from sigat_api.infra.reloj import Reloj
+from sigat_api.modules.registro import dominio
 from sigat_api.modules.registro import esquemas as e
 from sigat_api.modules.registro.cursor import TAMANO_PAGINA, codificar, decodificar
-from sigat_api.modules.registro.puertos import PuertoOperaciones
+from sigat_api.modules.registro.dominio import MENSAJES, MotivoRechazo
+from sigat_api.modules.registro.puertos import PuertoConfiguracion, PuertoOperaciones
 from sigat_api.modules.registro.repositorio import RepositorioRegistro
 from sigat_api.modules.registro.validador import ValidadorInvariantes
 
@@ -20,31 +20,119 @@ LIMITE_ACTIVIDAD_RECIENTE = 10
 
 
 class ServicioRegistro:
-    """Escritura. Implementa estructuralmente ``sincronizacion.puertos.PuertoRegistro``."""
-
     def __init__(
         self,
         repo: RepositorioRegistro,
         validador: ValidadorInvariantes,
         operaciones: PuertoOperaciones,
+        configuracion: PuertoConfiguracion,
         reloj: Reloj,
     ) -> None:
         self._repo = repo
         self._validador = validador
         self._operaciones = operaciones
+        self._configuracion = configuracion
         self._reloj = reloj
 
     async def aplicar(self, actor: Actor, op: OperacionCampo) -> ResultadoAplicacion:
-        """Aplica UNA operación dentro de la transacción del lote de sincronización.
+        ahora = self._reloj.ahora()
+        motivo = await self._validador.validar(op, ahora, actor)
+        if motivo is not None:
+            return self._rechazo(motivo)
 
-        1. ``validador.validar`` -> si hay motivo: ``rechazada`` (no toca el histórico).
-        2. ``repo.estado_previo`` + ``dominio.clasificar``.
-        3. ``revisar`` -> NO inserta en la tabla de dominio (queda solo en operacion_sync con payload).
-        4. alta/corrección -> ``repo.insertar_version`` (o ``insertar_visita``) ligado a ``op.oper_id``.
-        5. Si es lectura oficial (o su corrección/anulación): devolver ``periodos_afectados`` para
-           que Sincronización encole el reproceso de MTD y concepto (RF-054, ADR-13).
-        """
-        raise NoImplementado("Aplicar operación de campo")
+        if op.entidad == EntidadSync.VISITA:
+            return await self._aplicar_visita(actor, op)
+        if op.entidad == EntidadSync.LECTURA_TRAMPA:
+            return await self._aplicar_lectura(actor, op)
+
+        return ResultadoAplicacion(
+            ClasificacionOperacion.RECHAZADA,
+            motivo="Esta entidad todavía no se sincroniza desde el móvil.",
+            codigo="ENTIDAD_NO_SOPORTADA",
+        )
+
+    async def _aplicar_visita(self, actor: Actor, op: OperacionCampo) -> ResultadoAplicacion:
+        previo = await self._repo.estado_previo("visita", op.registro_id, None, None, op.t_observacion)
+        clasificacion, motivo = dominio.decidir(op.accion, op.version, op.t_observacion, previo)
+        if motivo is not None:
+            return self._rechazo(motivo)
+        if clasificacion not in (
+            ClasificacionOperacion.ALTA_NUEVA,
+            ClasificacionOperacion.ALTA_RETROACTIVA,
+        ):
+            return ResultadoAplicacion(clasificacion)
+
+        lote_ids = [int(x) for x in op.datos["lote_ids"]]
+        fila = {
+            "visi_id": op.registro_id,
+            "disp_id": op.disp_id,
+            "oper_id": op.oper_id,
+            "usua_id": actor.usua_id,
+            "pred_id": int(op.datos["pred_id"]),
+            "ruta_id": op.datos.get("ruta_id"),
+            "visi_t_inicio_obs": _instante(op.datos["visi_t_inicio_obs"]),
+            "visi_t_fin_obs": _instante(op.datos["visi_t_fin_obs"]),
+            "visi_t_captura": op.t_captura,
+            "visi_deriva_reloj_seg": op.deriva_reloj_seg,
+        }
+        await self._repo.insertar_visita(fila, lote_ids)
+        return ResultadoAplicacion(clasificacion)
+
+    async def _aplicar_lectura(self, actor: Actor, op: OperacionCampo) -> ResultadoAplicacion:
+        tram_id = int(op.datos["tram_id"])
+        pertenencia = await self._configuracion.pertenencia_trampa(tram_id, op.t_observacion)
+        if pertenencia is None or pertenencia.lote_id is None:
+            return self._rechazo(MotivoRechazo.TRAMPA_NO_PERTENECE_AL_LOTE)
+
+        previo = await self._repo.estado_previo(
+            "lectura_trampa", op.registro_id, pertenencia.lote_id, tram_id, op.t_observacion
+        )
+        clasificacion, motivo = dominio.decidir(op.accion, op.version, op.t_observacion, previo)
+        if motivo is not None:
+            return self._rechazo(motivo)
+        if clasificacion == ClasificacionOperacion.REVISAR:
+            return ResultadoAplicacion(
+                clasificacion,
+                motivo="Ya existe otra lectura de esta trampa el mismo día; la decidirá el agrónomo.",
+                codigo="SOLAPAMIENTO",
+            )
+
+        anterior: dict[str, object] = {}
+        if op.version > 1:
+            anterior = await self._repo.lectura_vigente(op.registro_id) or {}
+        datos = dict(anterior)
+        datos.update({k: v for k, v in op.datos.items() if k in anterior or k in _DATOS_LECTURA})
+
+        fila: dict[str, object] = {
+            **datos,
+            "lect_registro_id": op.registro_id,
+            "lect_version": op.version,
+            "usua_id": actor.usua_id,
+            "disp_id": op.disp_id,
+            "oper_id": op.oper_id,
+            "lect_t_observacion": op.t_observacion,
+            "lect_t_captura": op.t_captura,
+            "lect_deriva_reloj_seg": op.deriva_reloj_seg,
+            "lect_linaje": op.linaje or dominio.linaje_de(actor),
+        }
+        if fila.get("ubic_id") is None:
+            fila["ubic_id"] = pertenencia.ubic_id
+        fila["lect_anulada"] = op.accion == AccionSync.ANULAR
+        if op.accion == AccionSync.ANULAR:
+            fila["lect_motivo_anulacion"] = op.datos.get("lect_motivo_anulacion")
+        else:
+            fila.pop("lect_motivo_anulacion", None)
+
+        await self._repo.insertar_version("lectura_trampa", fila)
+        return ResultadoAplicacion(clasificacion)
+
+    @staticmethod
+    def _rechazo(motivo: MotivoRechazo) -> ResultadoAplicacion:
+        return ResultadoAplicacion(
+            ClasificacionOperacion.RECHAZADA,
+            motivo=MENSAJES[motivo],
+            codigo=motivo.value,
+        )
 
     # --- escrituras en línea de la web (pasan por el mismo camino) ---------------------------
     async def registrar_aplicacion(self, actor: Actor, s: e.NuevaAplicacion) -> e.Aplicacion:
@@ -182,7 +270,7 @@ def _pagina[T](
 
 def _solo_propias(actor: Actor) -> bool:
     """El técnico consulta su propio trabajo; los demás roles, lo de sus lotes visibles."""
-    return actor.rol == RolCodigo.TECNICO
+    return actor.rol.value == "TECNICO"
 
 
 def _validar_rango(desde: datetime | None, hasta: datetime | None) -> None:
@@ -399,3 +487,29 @@ class ServicioConsultaRegistro:
     async def _exigir_lote_visible(self, actor: Actor, lote_id: int) -> None:
         if not await self._repo.lote_visible(actor.usua_id, lote_id):
             raise NoEncontrado("El lote no existe o no es visible para usted.", codigo="LOTE_NO_ENCONTRADO")
+
+
+_DATOS_LECTURA = frozenset(
+    {
+        "visi_id",
+        "tram_id",
+        "ubic_id",
+        "lect_leida",
+        "lect_especimenes",
+        "lect_justificacion",
+        "cond_id",
+        "lect_fecha_cambio_cuerpo",
+        "lect_fecha_cambio_atrayente",
+        "atra_id",
+        "lect_observaciones",
+        "lect_precision_m",
+        "lect_coincide_lote",
+        "lect_motivo_correccion",
+    }
+)
+
+
+def _instante(valor: object) -> datetime:
+    if isinstance(valor, datetime):
+        return valor
+    return datetime.fromisoformat(str(valor).replace("Z", "+00:00"))

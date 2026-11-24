@@ -97,3 +97,41 @@ afirmar «el código es un stub», no la regla.
   saltar entre archivos para entender una línea. Los 387 comentarios de `bd/sql/` y los
   docstrings de las migraciones tampoco se tocaron: son la documentación por revisión
   que exige `bd/CAMBIOS.md` y que `scripts/revisar_migraciones.py` usa.
+
+## Sincronización del técnico (Sprint 2)
+
+- **Rutas del sprint** (`api/v1/rutas/sincronizacion.py`): `POST /sincronizacion/lotes`
+  recibe de 1 a 200 operaciones y `GET /sincronizacion/operaciones` consulta lo recibido
+  por el usuario. El lote responde **200 siempre que se pudo leer**: el resultado de cada
+  operación va en `resultados`, y una operación rechazada no tumba las demás. 403 solo si
+  el `disp_id` no es el del token o el dispositivo está dado de baja.
+- **Idempotencia**: `UNIQUE (disp_id, oper_cliente_id)` en `operacion_sync` más la huella
+  canónica SHA-256 del contenido (JSON RFC 8785). Reenviar la misma operación devuelve
+  `idempotente_repetida` sin duplicar; la misma identidad con contenido distinto devuelve
+  `conflicto_contenido`.
+- **Resultado por operación** (`ResultadoOperacion`): `alta_nueva`, `alta_retroactiva`,
+  `correccion`, `idempotente_repetida`, `conflicto_contenido`, `revisar` o `rechazada`,
+  con `motivo`, `codigo` y `reintentable`. Las decisiones de negocio no son
+  reintentables: reintentarlas automáticamente es un bucle.
+- **Fecha real de observación**: `t_observacion` es el instante en que el técnico vio la
+  trampa o el lote, no el de recepción. Las validaciones de período, lote activo y
+  pertenencia de la trampa se evalúan contra esa fecha. `t_captura` y `deriva_reloj_seg`
+  quedan para medir el reloj del teléfono.
+- **Corrección como versión nueva**: `version = 1` es el alta; `n + 1` es corrección o
+  anulación. Nunca se sobrescribe la versión anterior: la nueva fila conserva el linaje y
+  la anterior queda en el histórico. La anulación marca la lectura sin borrarla.
+- **«No leída» ≠ «cero moscas»**: `lect_leida = false` exige justificación y prohíbe
+  `lect_especimenes`; una trampa leída con `0` especímenes es un cero real. Son estados
+  distintos y no se normalizan entre sí.
+- **Contrato recortado** (`contracts/openapi.json`): se quitaron
+  `POST /sincronizacion/operaciones/{oper_id}/resolucion` y `GET /sincronizacion/cambios`,
+  que solo tenían `NoImplementado` detrás. Quedan fuera del Sprint 2 la resolución de
+  operaciones, la bajada de cambios, el recálculo de MTD/concepto y el paquete de campo.
+  El contrato ya no anuncia lo que no existe.
+- **Sin cambios de esquema**: el sprint usa las tablas de la revisión 0008
+  (`operacion_sync`, `recepcion_sync`, `dispositivo`); no hay migración nueva.
+- **Pruebas**: 228 pasan / 16 skip justificados, `mypy` sin errores y cobertura 75,75 %.
+  Las reglas del sprint son pruebas reales en
+  `tests/modules/sincronizacion/test_reglas.py` (idempotencia, huella inválida, no leída
+  frente a cero, corrección sin sobrescribir, error aislado por operación) y en
+  `test_huella.py` (vectores compartidos con el móvil).

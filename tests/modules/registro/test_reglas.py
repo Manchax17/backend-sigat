@@ -1,20 +1,8 @@
-"""Reglas de negocio del módulo registro: cada una cuenta para RNF-017.
-
-Patrón (igual que ``tests/modules/configuracion/test_reglas.py``): dobles que implementan
-el protocolo del repositorio + el servicio/dominio REAL, sin PostgreSQL.
-
-Honestidad: el motor temporal (``dominio.clasificar``), el validador de invariantes y el
-MTD son hoy un esqueleto ``NoImplementado`` en Python (las reglas viven en la BD:
-``fn_registro_version_valida``, CHECKs y vistas, o aún faltan). Esos tests son
-"tripwires": afirman el 501 actual y el token de contrato que la regla debe producir, y
-FALLAN en cuanto alguien programe la regla, obligando a reescribirlos con asserts reales.
-"""
-
 from copy import deepcopy
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 
@@ -30,14 +18,422 @@ from sigat_api.compartido.tipos import (
     ResultadoContraste,
     RolCodigo,
 )
-from sigat_api.modules.registro import esquemas as e
-from sigat_api.modules.registro.dominio import EstadoPrevio, MotivoRechazo, clasificar, orden_canonico
+from sigat_api.modules.registro.dominio import (
+    MENSAJES,
+    EstadoPrevio,
+    MotivoRechazo,
+    clasificar,
+    decidir,
+    orden_canonico,
+)
 from sigat_api.modules.registro.mtd import EntradaMtd, calcular
-from sigat_api.modules.registro.servicio import ServicioConsultaRegistro, ServicioRegistro, ServicioRevision
+from sigat_api.modules.registro.servicio import ServicioRegistro, ServicioRevision
 from sigat_api.modules.registro.validador import ValidadorInvariantes
 
+AHORA = datetime(2026, 9, 15, 15, 0, tzinfo=UTC)
+DISP = UUID("0190f5b0-0000-7000-8000-0000000000aa")
+USUA = 7
+PREDIO = 3
+LOTE = 42
+TRAMPA = 11
+VISITA = UUID("0190f5b0-0000-7000-8000-0000000000b1")
+
+
+class RepoFalso:
+    def __init__(self) -> None:
+        self.lecturas: list[dict[str, Any]] = []
+        self.visitas: list[tuple[dict[str, Any], list[int]]] = []
+        self.previo = EstadoPrevio(None, None, None, False)
+        self.anterior: dict[str, Any] | None = None
+        self.periodo: dict[str, Any] | None = {"peri_id": 5, "peri_estado": "abierto"}
+
+    async def estado_previo(
+        self,
+        entidad: str,
+        registro_id: UUID,
+        lote_id: int | None,
+        tram_id: int | None,
+        t_observacion: datetime,
+    ) -> EstadoPrevio:
+        return self.previo
+
+    async def insertar_version(self, entidad: str, fila: dict[str, Any]) -> UUID:
+        self.lecturas.append(fila)
+        return uuid4()
+
+    async def insertar_visita(self, fila: dict[str, Any], lote_ids: list[int]) -> None:
+        self.visitas.append((fila, lote_ids))
+
+    async def lectura_vigente(self, registro_id: UUID) -> dict[str, Any] | None:
+        return self.anterior
+
+    async def visita_existe(self, visi_id: UUID) -> bool:
+        return True
+
+    async def visita_lotes(self, visi_id: UUID) -> list[int]:
+        return [LOTE]
+
+    async def periodo_de(self, lote_id: int, fecha: date) -> dict[str, Any] | None:
+        return self.periodo
+
+
+class ConfiguracionFalsa:
+    def __init__(self) -> None:
+        self.pertenencia = PertenenciaTrampa(
+            tram_id=TRAMPA, ubic_id=9, lote_id=LOTE, pred_id=PREDIO, lote_activo=True
+        )
+        self.visible = True
+        self.lote_activo = True
+
+    async def pertenencia_trampa(self, tram_id: int, instante: datetime) -> PertenenciaTrampa | None:
+        return self.pertenencia
+
+    async def lote_activo_en(self, lote_id: int, instante: datetime) -> bool:
+        return self.lote_activo
+
+    async def lote_visible(self, usua_id: int, lote_id: int) -> bool:
+        return self.visible
+
+    async def lote_predio(self, lote_id: int) -> int | None:
+        return PREDIO
+
+
+class RelojFalso:
+    def ahora(self) -> datetime:
+        return AHORA
+
+
+def _actor(rol: RolCodigo = RolCodigo.TECNICO) -> Actor:
+    return Actor(usua_id=USUA, rol=rol, disp_id=DISP, cliente=Cliente.MOVIL)
+
+
+def _operacion(
+    *,
+    entidad: EntidadSync = EntidadSync.LECTURA_TRAMPA,
+    accion: AccionSync = AccionSync.CREAR,
+    version: int = 1,
+    datos: dict[str, Any] | None = None,
+    t_observacion: datetime = AHORA,
+    linaje: Linaje | None = Linaje.INSPECCION_OFICIAL,
+) -> OperacionCampo:
+    return OperacionCampo(
+        oper_id=1,
+        cliente_id=uuid4(),
+        disp_id=DISP,
+        entidad=entidad,
+        accion=accion,
+        registro_id=uuid4(),
+        version=version,
+        linaje=linaje,
+        t_observacion=t_observacion,
+        t_captura=t_observacion,
+        deriva_reloj_seg=0,
+        datos=datos or _datos_lectura(),
+    )
+
+
+def _datos_lectura(**cambios: Any) -> dict[str, Any]:
+    datos: dict[str, Any] = {
+        "visi_id": str(VISITA),
+        "tram_id": TRAMPA,
+        "cond_id": 1,
+        "lect_leida": True,
+        "lect_especimenes": 4,
+        "lect_justificacion": None,
+    }
+    datos.update(cambios)
+    return datos
+
+
+def _servicio(
+    *,
+    repo: RepoFalso | None = None,
+    configuracion: ConfiguracionFalsa | None = None,
+) -> tuple[ServicioRegistro, RepoFalso, ConfiguracionFalsa]:
+    repo = repo or RepoFalso()
+    configuracion = configuracion or ConfiguracionFalsa()
+    validador = ValidadorInvariantes(configuracion, repo)  # type: ignore[arg-type]
+    return (
+        ServicioRegistro(
+            repo,  # type: ignore[arg-type]
+            validador,
+            operaciones=None,  # type: ignore[arg-type]
+            configuracion=configuracion,  # type: ignore[arg-type]
+            reloj=RelojFalso(),
+        ),
+        repo,
+        configuracion,
+    )
+
+
+def _previo(**cambios: Any) -> EstadoPrevio:
+    valores: dict[str, Any] = {
+        "version_vigente": None,
+        "t_observacion_original": None,
+        "ultima_t_observacion_serie": None,
+        "hay_solapamiento": False,
+    }
+    valores.update(cambios)
+    return EstadoPrevio(**valores)
+
+
+def _reemplazar(previo: EstadoPrevio, **cambios: Any) -> EstadoPrevio:
+    valores = {
+        "version_vigente": previo.version_vigente,
+        "t_observacion_original": previo.t_observacion_original,
+        "ultima_t_observacion_serie": previo.ultima_t_observacion_serie,
+        "hay_solapamiento": previo.hay_solapamiento,
+    }
+    valores.update(cambios)
+    return EstadoPrevio(**valores)
+
+
+@pytest.mark.regla
+def test_registro_01() -> None:
+    antes = AHORA - timedelta(hours=1)
+    despues = AHORA + timedelta(minutes=1)
+    tardia = orden_canonico(despues, AHORA, "a")
+    temprana_con_captura_tardia = orden_canonico(antes, despues, "b")
+    temprana_mismo_instante_a = orden_canonico(antes, AHORA, "a")
+    temprana_mismo_instante_b = orden_canonico(antes, AHORA, "b")
+
+    assert sorted(
+        [tardia, temprana_con_captura_tardia, temprana_mismo_instante_b, temprana_mismo_instante_a]
+    ) == [temprana_mismo_instante_a, temprana_mismo_instante_b, temprana_con_captura_tardia, tardia]
+    assert len(tardia) == 3
+
+
+@pytest.mark.regla
+def test_registro_02() -> None:
+    ultima = AHORA
+    previo = _reemplazar(_previo(), ultima_t_observacion_serie=ultima)
+
+    assert (
+        clasificar(AccionSync.CREAR, 1, AHORA - timedelta(days=2), previo)
+        is ClasificacionOperacion.ALTA_RETROACTIVA
+    )
+    assert (
+        clasificar(AccionSync.CREAR, 1, AHORA + timedelta(minutes=1), previo)
+        is ClasificacionOperacion.ALTA_NUEVA
+    )
+
+
+@pytest.mark.regla
+def test_registro_03() -> None:
+    previo = _reemplazar(_previo(), version_vigente=1, t_observacion_original=AHORA)
+
+    assert clasificar(AccionSync.CORREGIR, 2, AHORA, previo) is ClasificacionOperacion.CORRECCION
+    assert clasificar(AccionSync.CORREGIR, 3, AHORA, previo) is ClasificacionOperacion.RECHAZADA
+    assert clasificar(AccionSync.CORREGIR, 2, AHORA, _previo()) is ClasificacionOperacion.RECHAZADA
+    assert clasificar(AccionSync.ANULAR, 2, AHORA, previo) is ClasificacionOperacion.CORRECCION
+
+
+@pytest.mark.regla
+def test_registro_04() -> None:
+    previo = _reemplazar(_previo(), version_vigente=1, t_observacion_original=AHORA)
+
+    clasificacion, motivo = decidir(AccionSync.CORREGIR, 2, AHORA - timedelta(minutes=5), previo)
+
+    assert clasificacion is ClasificacionOperacion.RECHAZADA
+    assert motivo is MotivoRechazo.T_OBSERVACION_CAMBIADA
+    assert MENSAJES[motivo] == ("La fecha de observación no se puede cambiar; anule y cree un registro nuevo")
+
+
+@pytest.mark.regla
+def test_registro_05() -> None:
+    previo = _reemplazar(_previo(), hay_solapamiento=True)
+
+    assert clasificar(AccionSync.CREAR, 1, AHORA, previo) is ClasificacionOperacion.REVISAR
+    con_version = _reemplazar(previo, version_vigente=1, t_observacion_original=AHORA)
+    assert clasificar(AccionSync.CORREGIR, 2, AHORA, con_version) is ClasificacionOperacion.REVISAR
+
+
+@pytest.mark.regla
+async def test_registro_06() -> None:
+    validador = ValidadorInvariantes(ConfiguracionFalsa(), RepoFalso())  # type: ignore[arg-type]
+    futura = _operacion(t_observacion=AHORA + timedelta(hours=1))
+
+    assert await validador.validar(futura, AHORA, _actor()) is MotivoRechazo.FECHA_FUTURA
+    casi_ahora = _operacion(t_observacion=AHORA + timedelta(minutes=4))
+    assert await validador.validar(casi_ahora, AHORA, _actor()) is None
+
+
+@pytest.mark.regla
+async def test_registro_07() -> None:
+    repo = RepoFalso()
+    configuracion = ConfiguracionFalsa()
+    validador = ValidadorInvariantes(configuracion, repo)  # type: ignore[arg-type]
+    op = _operacion()
+
+    configuracion.pertenencia = PertenenciaTrampa(
+        tram_id=TRAMPA, ubic_id=None, lote_id=None, pred_id=PREDIO, lote_activo=True
+    )
+    assert await validador.validar(op, AHORA, _actor()) is MotivoRechazo.TRAMPA_NO_PERTENECE_AL_LOTE
+
+    configuracion.pertenencia = PertenenciaTrampa(
+        tram_id=TRAMPA, ubic_id=9, lote_id=LOTE + 1, pred_id=PREDIO, lote_activo=True
+    )
+    assert await validador.validar(op, AHORA, _actor()) is MotivoRechazo.TRAMPA_NO_PERTENECE_AL_LOTE
+
+
+@pytest.mark.regla
+async def test_registro_08() -> None:
+    repo = RepoFalso()
+    validador = ValidadorInvariantes(ConfiguracionFalsa(), repo)  # type: ignore[arg-type]
+
+    sin_justificar = _operacion(
+        datos=_datos_lectura(lect_leida=False, lect_especimenes=None, lect_justificacion="   ")
+    )
+    con_especimenes = _operacion(
+        datos=_datos_lectura(lect_leida=False, lect_especimenes=0, lect_justificacion="Trampa caída")
+    )
+    correcta = _operacion(
+        datos=_datos_lectura(lect_leida=False, lect_especimenes=None, lect_justificacion="Trampa caída")
+    )
+
+    assert await validador.validar(sin_justificar, AHORA, _actor()) is MotivoRechazo.VALOR_NO_VALIDO
+    assert await validador.validar(con_especimenes, AHORA, _actor()) is MotivoRechazo.VALOR_NO_VALIDO
+    assert await validador.validar(correcta, AHORA, _actor()) is None
+
+
+async def test_visita_y_lectura_se_persisten_con_el_actor_del_token() -> None:
+    servicio, repo, _ = _servicio()
+    visita = _operacion(
+        entidad=EntidadSync.VISITA,
+        datos={
+            "pred_id": PREDIO,
+            "lote_ids": [LOTE],
+            "visi_t_inicio_obs": (AHORA - timedelta(hours=2)).isoformat(),
+            "visi_t_fin_obs": AHORA.isoformat(),
+            "ruta_id": None,
+        },
+        linaje=None,
+    )
+
+    resultado_visita = await servicio.aplicar(_actor(), visita)
+    resultado_lectura = await servicio.aplicar(_actor(), _operacion())
+
+    assert resultado_visita.clasificacion is ClasificacionOperacion.ALTA_NUEVA
+    fila_visita, lotes = repo.visitas[0]
+    assert fila_visita["usua_id"] == USUA
+    assert fila_visita["disp_id"] == DISP
+    assert fila_visita["oper_id"] == visita.oper_id
+    assert lotes == [LOTE]
+
+    assert resultado_lectura.clasificacion is ClasificacionOperacion.ALTA_NUEVA
+    fila_lectura = repo.lecturas[0]
+    assert fila_lectura["lect_linaje"] is Linaje.INSPECCION_OFICIAL
+    assert fila_lectura["lect_anulada"] is False
+    assert fila_lectura["ubic_id"] == 9
+    assert fila_lectura["lect_t_observacion"] == AHORA
+
+
+async def test_correccion_parcial_conserva_los_datos_de_la_version_anterior() -> None:
+    repo = RepoFalso()
+    repo.previo = EstadoPrevio(1, AHORA, AHORA, False)
+    repo.anterior = {
+        "visi_id": VISITA,
+        "tram_id": TRAMPA,
+        "ubic_id": 9,
+        "lect_leida": True,
+        "lect_especimenes": 4,
+        "lect_justificacion": None,
+        "cond_id": 1,
+        "lect_observaciones": "Primera visita",
+    }
+    servicio, _, _ = _servicio(repo=repo)
+
+    resultado = await servicio.aplicar(
+        _actor(),
+        _operacion(
+            accion=AccionSync.CORREGIR,
+            version=2,
+            datos=_datos_lectura(lect_especimenes=6, lect_motivo_correccion="Recuento"),
+        ),
+    )
+
+    assert resultado.clasificacion is ClasificacionOperacion.CORRECCION
+    fila = repo.lecturas[0]
+    assert fila["lect_version"] == 2
+    assert fila["lect_especimenes"] == 6
+    assert fila["lect_observaciones"] == "Primera visita"
+
+
+async def test_anulacion_marca_la_lectura_sin_borrar_la_anterior() -> None:
+    repo = RepoFalso()
+    repo.previo = EstadoPrevio(1, AHORA, AHORA, False)
+    repo.anterior = {
+        "visi_id": VISITA,
+        "tram_id": TRAMPA,
+        "ubic_id": 9,
+        "lect_leida": True,
+        "lect_especimenes": 4,
+        "cond_id": 1,
+    }
+    servicio, _, _ = _servicio(repo=repo)
+
+    await servicio.aplicar(
+        _actor(),
+        _operacion(
+            accion=AccionSync.ANULAR,
+            version=2,
+            datos=_datos_lectura(lect_motivo_anulacion="Trampa mal identificada"),
+        ),
+    )
+
+    fila = repo.lecturas[0]
+    assert fila["lect_version"] == 2
+    assert fila["lect_anulada"] is True
+    assert fila["lect_motivo_anulacion"] == "Trampa mal identificada"
+    assert len(repo.lecturas) == 1
+
+
+async def test_visita_en_lote_no_visible_se_rechaza_sin_tocar_el_historico() -> None:
+    configuracion = ConfiguracionFalsa()
+    configuracion.visible = False
+    servicio, repo, _ = _servicio(configuracion=configuracion)
+
+    resultado = await servicio.aplicar(
+        _actor(),
+        _operacion(
+            entidad=EntidadSync.VISITA,
+            datos={
+                "pred_id": PREDIO,
+                "lote_ids": [LOTE],
+                "visi_t_inicio_obs": AHORA.isoformat(),
+                "visi_t_fin_obs": AHORA.isoformat(),
+            },
+            linaje=None,
+        ),
+    )
+
+    assert resultado.clasificacion is ClasificacionOperacion.RECHAZADA
+    assert resultado.codigo == MotivoRechazo.SIN_PERMISO_SOBRE_LOTE.value
+    assert repo.visitas == []
+
+
+async def test_lectura_sin_periodo_es_fuera_de_periodo() -> None:
+    repo = RepoFalso()
+    repo.periodo = None
+    servicio, _, _ = _servicio(repo=repo)
+
+    resultado = await servicio.aplicar(_actor(), _operacion())
+
+    assert resultado.clasificacion is ClasificacionOperacion.RECHAZADA
+    assert resultado.codigo == MotivoRechazo.FUERA_DE_PERIODO.value
+    assert repo.lecturas == []
+
+
+async def test_lectura_de_productor_es_autorreporte() -> None:
+    servicio, repo, _ = _servicio()
+
+    resultado = await servicio.aplicar(_actor(RolCodigo.PRODUCTOR), _operacion(linaje=None))
+
+    assert resultado.clasificacion is ClasificacionOperacion.ALTA_NUEVA
+    assert repo.lecturas[0]["lect_linaje"] is Linaje.AUTORREPORTE
+
+
 AGRONOMO = Actor(usua_id=3, rol=RolCodigo.AGRONOMO_SUPERVISOR, disp_id=None, cliente=Cliente.WEB)
-AHORA = datetime(2026, 11, 12, 15, 0, tzinfo=UTC)
 T_OBS = datetime(2026, 11, 10, 8, 10, tzinfo=UTC)
 VISI = UUID("0190f0d0-0000-7000-8000-000000000001")
 REGISTRO = UUID("0190f0d0-0000-7000-8000-0000000000aa")
@@ -154,216 +550,6 @@ class _RelojFijo:
         return AHORA
 
 
-class _RepoFalso:
-    def __init__(self) -> None:
-        self.llamadas: list[tuple[Any, ...]] = []
-
-    async def estado_previo(self, *args: Any) -> Any:
-        self.llamadas.append(args)
-        return None
-
-
-def _lectura(t_observacion: datetime, datos: dict[str, Any]) -> OperacionCampo:
-    return OperacionCampo(
-        oper_id=1,
-        cliente_id=CLIENTE_ID,
-        disp_id=DISP_ID,
-        entidad=EntidadSync.LECTURA_TRAMPA,
-        accion=AccionSync.CREAR,
-        registro_id=REGISTRO,
-        version=1,
-        linaje=Linaje.INSPECCION_OFICIAL,
-        t_observacion=t_observacion,
-        t_captura=t_observacion + timedelta(minutes=1),
-        deriva_reloj_seg=0,
-        datos=datos,
-    )
-
-
-# ------------------------------------------------------------------ R-T1: orden canónico
-@pytest.mark.regla
-def test_registro_01() -> None:
-    """R-T1: orden canónico por t_observacion; desempate (t_captura, id); la llegada no participa."""
-    lecturas = [
-        {"reg": "0003", "obs": _el(10, 8, 10), "cap": _el(10, 8, 11), "llego": _el(10, 12, 0)},
-        {"reg": "0001", "obs": _el(10, 8, 5), "cap": _el(10, 8, 31), "llego": _el(10, 11, 0)},
-        {"reg": "0002", "obs": _el(10, 8, 10), "cap": _el(10, 8, 0), "llego": _el(10, 13, 0)},
-        {"reg": "0000", "obs": _el(10, 8, 10), "cap": _el(10, 8, 0), "llego": _el(10, 10, 0)},
-    ]
-    claves = [orden_canonico(f["obs"], f["cap"], f["reg"]) for f in lecturas]
-    orden = [f["reg"] for _, f in sorted(zip(claves, lecturas, strict=True))]
-
-    assert orden == ["0001", "0000", "0002", "0003"]  # observación, luego captura, luego id
-    assert claves[2] < claves[0]  # "0002" llegó después que "0003" pero va antes: la llegada no ordena
-    assert orden_canonico(_el(10, 8, 5), _el(10, 8, 31), "0001") == (_el(10, 8, 5), _el(10, 8, 31), "0001")
-
-
-# ------------------------------------------------------------------ R-T2: alta retroactiva
-@pytest.mark.regla
-def test_registro_02() -> None:
-    """R-T2: crear con t_observacion anterior a la última de la serie = alta_retroactiva.
-
-    El motor temporal aún es esqueleto en Python (dominio.clasificar): tripwire.
-    """
-    previo = EstadoPrevio(
-        version_vigente=None,
-        t_observacion_original=None,
-        ultima_t_observacion_serie=_el(10, 8, 0),
-        hay_solapamiento=False,
-    )
-
-    with pytest.raises(NoImplementado) as exc:
-        clasificar(AccionSync.CREAR, 1, _el(9, 10), previo)  # observada el día 9, antes que la última
-
-    assert exc.value.estado_http == 501
-    assert exc.value.codigo == "NO_IMPLEMENTADO"
-    assert "Clasificación de la operación" in exc.value.detalle
-    # token que la regla debe guardar en oper_clasificacion (CHECK de BD, d_clasificacion_operacion)
-    assert ClasificacionOperacion.ALTA_RETROACTIVA.value == "alta_retroactiva"
-
-
-# ------------------------------------------------------------------ R-T3: versión n+1
-@pytest.mark.regla
-async def test_registro_03() -> None:
-    """R-T3: la corrección deja versión n+1 y conserva la anterior (append-only, nada se sobrescribe)."""
-    repo = _RepoVersiones(VERSIONES)
-    historial = await ServicioConsultaRegistro(repo).versiones_lectura(AGRONOMO, REGISTRO)  # type: ignore[arg-type]
-
-    assert historial.entidad == "lectura_trampa"
-    assert historial.registro_id == REGISTRO
-    assert [v.version for v in historial.versiones] == [1, 2]
-    assert historial.t_observacion == T_OBS  # misma ventana para ambas versiones
-    assert historial.versiones[0].accion == AccionSync.CREAR  # la 1 es el alta
-    assert historial.versiones[0].valores == {"lect_especimenes": 9}  # la original se conserva
-    assert historial.versiones[1].accion == AccionSync.CORREGIR
-    assert historial.versiones[1].motivo == "Se contaron dos veces los mismos especímenes"
-    assert repo.consultadas == [("lectura_trampa", REGISTRO)]
-
-    # Camino de escritura (crear la n+1): el servicio aún es esqueleto en Python.
-    with pytest.raises(NoImplementado) as exc:
-        await ServicioRegistro(None, None, None, None).corregir_lectura(  # type: ignore[arg-type]
-            AGRONOMO,
-            REGISTRO,
-            e.CorreccionLectura(lect_especimenes=7, motivo="Se contaron dos veces los mismos especímenes"),
-        )
-    assert "Corregir lectura" in exc.value.detalle
-
-
-# ------------------------------------------------------------------ ADR-02: t_observacion inmutable
-@pytest.mark.regla
-async def test_registro_04() -> None:
-    """ADR-02: la corrección no puede cambiar t_observacion (anular y crear nueva, no corregir la fecha)."""
-    # 1) El contrato web de corrección ni siquiera admite otra fecha de observación.
-    assert "t_observacion" not in e.CorreccionLectura.model_fields
-    # 2) El historial reporta la fecha de la versión 1 aunque una versión posterior traiga otra:
-    #    la fecha vive en el registro, no en la versión del cambio.
-    versiones = deepcopy(VERSIONES)
-    versiones[1]["t_observacion"] = T_OBS + timedelta(hours=3)
-    historial = await ServicioConsultaRegistro(_RepoVersiones(versiones)).versiones_lectura(  # type: ignore[arg-type]
-        AGRONOMO, REGISTRO
-    )
-    assert historial.t_observacion == T_OBS
-    # 3) La decisión de dominio (rechazar si difiere de la original) aún es esqueleto: tripwire.
-    previo = EstadoPrevio(
-        version_vigente=1,
-        t_observacion_original=T_OBS,
-        ultima_t_observacion_serie=T_OBS,
-        hay_solapamiento=False,
-    )
-    with pytest.raises(NoImplementado) as exc:
-        clasificar(AccionSync.CORREGIR, 2, T_OBS + timedelta(hours=1), previo)
-    assert "Clasificación de la operación" in exc.value.detalle
-    assert MotivoRechazo.T_OBSERVACION_CAMBIADA.value == "T_OBSERVACION_CAMBIADA"
-
-
-# ------------------------------------------------------------------ R-T5: solapamiento
-@pytest.mark.regla
-def test_registro_05() -> None:
-    """R-T5: solapamiento deja la operación en 'revisar' y no elige ganador.
-
-    La bandera existe en EstadoPrevio; la decisión del motor temporal aún es esqueleto: tripwire.
-    """
-    previo = EstadoPrevio(
-        version_vigente=1,
-        t_observacion_original=T_OBS,
-        ultima_t_observacion_serie=T_OBS,
-        hay_solapamiento=True,  # otra medición del mismo tipo cubre esa ventana
-    )
-    assert previo.hay_solapamiento is True
-
-    with pytest.raises(NoImplementado) as exc:
-        clasificar(AccionSync.CREAR, 1, T_OBS, previo)
-    assert "Clasificación de la operación" in exc.value.detalle
-    # token que la regla debe producir (d_clasificacion_operacion): quedarse en revisar.
-    assert ClasificacionOperacion.REVISAR.value == "revisar"
-
-
-# ------------------------------------------------------------------ validaciones del invariante
-@pytest.mark.regla
-async def test_registro_06() -> None:
-    """fecha de observación futura se rechaza (MotivoRechazo.FECHA_FUTURA).
-
-    El validador de invariantes aún es esqueleto en Python: tripwire.
-    """
-    futura = AHORA + timedelta(days=1)
-    assert futura > AHORA  # la fixture sí es futura
-    config = _ConfigFalsa(None)
-
-    with pytest.raises(NoImplementado) as exc:
-        await ValidadorInvariantes(config, _RepoFalso()).validar(_lectura(futura, {}), AHORA)
-
-    assert exc.value.estado_http == 501
-    assert exc.value.codigo == "NO_IMPLEMENTADO"
-    assert "Validación de invariantes" in exc.value.detalle
-    assert config.llamadas == []  # el esqueleto ni siquiera consultó el puerto
-    assert MotivoRechazo.FECHA_FUTURA.value == "FECHA_FUTURA"
-
-
-@pytest.mark.regla
-async def test_registro_07() -> None:
-    """trampa que no pertenecía al lote en t_observacion se rechaza (TRAMPA_NO_PERTENECE_AL_LOTE).
-
-    El validador aún es esqueleto: la pertenencia la debe preguntar PuertoConfiguracion en el
-    instante de la observación (no hoy). Tripwire.
-    """
-    config = _ConfigFalsa(
-        PertenenciaTrampa(tram_id=1, ubic_id=1, lote_id=2, pred_id=1, lote_activo=True)  # lote 2 ≠ lote 1
-    )
-    op = _lectura(T_OBS, {"lote_id": 1, "tram_id": 1})
-
-    with pytest.raises(NoImplementado) as exc:
-        await ValidadorInvariantes(config, _RepoFalso()).validar(op, AHORA)
-
-    assert exc.value.codigo == "NO_IMPLEMENTADO"
-    assert "Validación de invariantes" in exc.value.detalle
-    assert config.llamadas == []  # no consultó la ubicación vigente al observar
-    assert MotivoRechazo.TRAMPA_NO_PERTENECE_AL_LOTE.value == "TRAMPA_NO_PERTENECE_AL_LOTE"
-
-
-@pytest.mark.regla
-async def test_registro_08() -> None:
-    """lectura no leída exige justificación y especímenes nulos (MotivoRechazo.VALOR_NO_VALIDO).
-
-    Hoy lo exige la CHECK ``lectura_trampa_conteo_coherente`` (bd/sql/01_esquema_completo.sql);
-    el validador Python aún es esqueleto: tripwire.
-    """
-    op = _lectura(
-        T_OBS,
-        {"lect_leida": False, "lect_especimenes": 3, "lect_justificacion": None},  # inválido
-    )
-    assert op.datos["lect_especimenes"] is not None
-    assert op.datos["lect_justificacion"] is None
-
-    with pytest.raises(NoImplementado) as exc:
-        await ValidadorInvariantes(_ConfigFalsa(None), _RepoFalso()).validar(op, AHORA)
-
-    assert exc.value.estado_http == 501
-    assert "Validación de invariantes" in exc.value.detalle
-    assert MotivoRechazo.VALOR_NO_VALIDO.value == "VALOR_NO_VALIDO"
-
-
-# ------------------------------------------------------------------ MTD
-@pytest.mark.regla
 def test_registro_09() -> None:
     """MTD = M/(T×D) y T×D=0 da nulo.
 
