@@ -118,7 +118,9 @@ class ServicioConcepto:
         serie = [e.PuntoMtd(**p) for p in await self._repo.serie(actor.usua_id, lote_id, None, None)]
         etapa_dict = await self._repo.etapa(lote_id, None, self._zona)
         etapa = etapa_lote(etapa_dict)
-        datos = {k: v for k, v in fila.items() if k in e.ResumenLote.model_fields}
+        # Excluir los campos que el servicio construye explícitamente para evitar colisión de kwargs.
+        _construidos = {"mtd_es_estimacion", "periodo_actual", "etapa", "revision_pendiente", "serie"}
+        datos = {k: v for k, v in fila.items() if k in e.ResumenLote.model_fields and k not in _construidos}
         return e.ResumenLote(
             **datos,
             mtd_es_estimacion=False,  # ADR-15: la cifra del servidor es la autorizada
