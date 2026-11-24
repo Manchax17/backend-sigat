@@ -124,7 +124,9 @@ class ServicioConcepto:
 
         # Si el repositorio falso o directo ya armó etapa, periodo_actual y serie (ej. pruebas de resumen_lote)
         if "etapa" in fila and isinstance(fila["etapa"], (dict, e.EtapaLote)):
-            etapa_val = fila["etapa"] if isinstance(fila["etapa"], e.EtapaLote) else e.EtapaLote(**fila["etapa"])
+            etapa_val = (
+                fila["etapa"] if isinstance(fila["etapa"], e.EtapaLote) else e.EtapaLote(**fila["etapa"])
+            )
             periodo_val = (
                 fila["periodo_actual"]
                 if isinstance(fila.get("periodo_actual"), (e.PeriodoTrampeo, type(None)))
