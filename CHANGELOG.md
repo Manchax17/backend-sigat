@@ -12,12 +12,11 @@ pendientes viven aquí, no en el código.
 Extraídos del código en el cierre del Sprint 2 backend (seguían siendo comentarios
 «PENDIENTE» en el fuente; aquí siguen siendo visibles sin ensuciar el código):
 
-1. **Worker de la cola (procrastinate)** — `src/sigat_api/worker.py` lanza
-   `NotImplementedError`. Tareas previstas: `reprocesar_periodo` →
-   `sincronizacion.procesador.ProcesadorReproceso`; `generar_paquete_campo` →
-   `configuracion.servicio.ServicioPaqueteCampo.generar`; `verificar_archivo` →
-   `imagenes.servicio.ServicioArchivos`; `enviar_correo` → `infra.correo.enviar`.
-   Arranque: `app.run_worker_async(concurrency=cfg.cola_concurrencia)`.
+1. **Worker de la cola** — `src/sigat_api/worker.py` ya consume
+   `generar_paquete_campo` → `configuracion.servicio.ServicioPaqueteCampo.generar`.
+   Quedan por registrar `reprocesar_periodo` →
+   `sincronizacion.procesador.ProcesadorReproceso`, `verificar_archivo` →
+   `imagenes.servicio.ServicioArchivos` y `enviar_correo` → `infra.correo.enviar`.
 2. **Bloques nulos del inicio** — `api/v1/rutas/yo.py`: los bloques `tecnico` /
    `productor` / `agronomo` de `InicioResumen` van en `null` (nunca valores inventados)
    hasta que sus módulos estén implementados.
@@ -54,6 +53,30 @@ Corresponden a Sprints 3–5 del cronograma, no al Sprint 2:
 Para llevar cada skip a test real hay que **implementar el feature** (el test ya está
 diseñado: docstring con la regla y el camino a ejercer). Probar el esqueleto equivaldría a
 afirmar «el código es un stub», no la regla.
+
+## Paquete de campo y resumen del lote (Sprint 3)
+
+- **Paquete de campo (ADR-09)**: `GET /predios/{id}/paquete-campo` devuelve
+  `paqu_version`, `paqu_hash` (SHA-256, ETag), `generado_en` e `invalidado_en`;
+  `GET /predios/{id}/paquete-campo/contenido` entrega el paquete completo y responde
+  `304` cuando el `If-None-Match` coincide con el hash vigente.
+- **Contenido**: predio, programa vigente, mapa en GeoJSON (`FeatureCollection` de
+  predio, lotes, celdas y trampas), catálogos y configuración del mapa base. El móvil
+  lo guarda para trabajar sin red.
+- **Resumen del lote (RF-024)**: `GET /lotes/{id}/resumen` devuelve MTD, umbral,
+  concepto y fecha de efecto del lote.
+- **Invalidación y cola**: los cambios de predio, lote, geometría, trampa, programa y
+  retícula invalidan el paquete vigente y encolan `generar_paquete_campo`. El worker
+  (`python -m sigat_api.worker`) consume la tarea y regenera el paquete en una
+  transacción con actor de sistema.
+- **Catálogos y programa**: el paquete usa `unid_nombre`/`unid_magnitud` de
+  `sigat.unidad_medida` y no filtra `norm_id` cuando no hay norma vigente.
+- **Contrato**: `contracts/openapi.json` regenerado y verificado con
+  `make contrato-verificar`.
+- **Pruebas**: `make calidad` en verde (322 pruebas, 6 skip justificados, contrato
+  sincronizado).
+- **Fuera de alcance**: dibujo con MapLibre, mosaicos e imágenes satelitales;
+  `GET /sincronizacion/cambios` sigue pendiente.
 
 ## Cierre del Sprint 2 (backend)
 
