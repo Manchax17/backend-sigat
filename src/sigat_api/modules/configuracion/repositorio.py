@@ -934,12 +934,13 @@ RETURNING ubic_id
 
         if datos.get("norm_id") is not None:
             datos["norma"] = {
-                "norm_id": datos["norm_id"],
+                "norm_id": datos.pop("norm_id"),
                 "norm_codigo": datos.pop("norm_codigo"),
                 "norm_titulo": datos.pop("norm_titulo"),
             }
         else:
             datos["norma"] = None
+            datos.pop("norm_id", None)
             datos.pop("norm_codigo", None)
             datos.pop("norm_titulo", None)
         datos.pop("norm_id", None)
@@ -967,12 +968,13 @@ RETURNING ubic_id
 
         if datos.get("norm_id") is not None and datos.get("norm_codigo") is not None:
             datos["norma"] = {
-                "norm_id": datos["norm_id"],
+                "norm_id": datos.pop("norm_id"),
                 "norm_codigo": datos.pop("norm_codigo"),
                 "norm_titulo": datos.pop("norm_titulo"),
             }
         else:
             datos["norma"] = None
+            datos.pop("norm_id", None)
             datos.pop("norm_codigo", None)
             datos.pop("norm_titulo", None)
         datos.pop("norm_id", None)
@@ -1251,7 +1253,7 @@ RETURNING ubic_id
             ),
             (
                 "unidad_medida",
-                "SELECT unid_id, unid_nombre, unid_simbolo FROM sigat.unidad_medida ORDER BY unid_id",
+                "SELECT unid_id, unid_nombre, unid_simbolo, unid_magnitud FROM sigat.unidad_medida ORDER BY unid_id",
             ),
         ]
         for nombre, sql in tablas:
