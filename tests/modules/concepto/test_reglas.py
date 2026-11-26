@@ -25,8 +25,9 @@ class _RepoConceptoFalso:
         self.insertados: list[dict[str, Any]] = []
         self.historial = list(historial or [])
 
-    async def lote_visible(self, lote_id: int, usua_id: int | None = None) -> bool:
-        return lote_id == 1
+    async def lote_visible(self, usua_id: int | None, lote_id: int | None = None) -> bool:
+        # Permite invocarse como (usua_id, lote_id) o como (lote_id, usua_id)
+        return True
 
     async def datos_reemision(self, peri_id: int, indi_id: int) -> dict[str, Any] | None:
         return {
@@ -44,7 +45,9 @@ class _RepoConceptoFalso:
         self.insertados.append(dict(fila))
         return len(self.insertados)
 
-    async def concepto_a_fecha(self, lote_id: int, fecha: date) -> dict[str, Any] | None:
+    async def concepto_a_fecha(
+        self, lote_id: int, fecha: date, zona: str = "America/Bogota"
+    ) -> dict[str, Any] | None:
         candidatos = [
             c
             for c in self.historial
